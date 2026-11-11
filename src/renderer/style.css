@@ -1,5 +1,46 @@
-﻿html,body,#root { margin:0; height:100%; overflow:hidden; }
+html,body,#root { margin:0; height:100%; overflow:hidden; }
 * { box-sizing:border-box; }
+
+/* Custom modern dark scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.35);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background-color: #98baff;
+}
+
+::-webkit-scrollbar-button {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
 .web-slot { flex:1; min-height:0; background:#111923; border-radius:12px; }
 .subtitle-list { overflow:auto; flex:1; min-height:0; padding:8px 16px; }
 .cue { padding:12px; margin-bottom:8px; border:1px solid #263242; border-radius:10px;  content-visibility:auto; contain-intrinsic-size:auto 100px; }

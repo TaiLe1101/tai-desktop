@@ -16,7 +16,41 @@ import { sourceLanguages, type SourceLanguage, type DesktopApi, type SettingsInp
 import { VoicePlayer } from './player';
 import './style.css';
 declare global { interface Window { tai: DesktopApi } }
-const theme = createTheme({ palette: { mode: 'dark', primary: { main: '#98baff' }, background: { default: '#0b1018', paper: '#141c28' } }, typography: { fontFamily: 'Segoe UI, sans-serif', button: { textTransform: 'none', fontWeight: 600 } }, shape: { borderRadius: 12 }, components: { MuiButtonBase: { styleOverrides: { root: { cursor: 'default' } } } } });
+const theme = createTheme({
+  palette: { mode: 'dark', primary: { main: '#98baff' }, background: { default: '#0b1018', paper: '#141c28' } },
+  typography: { fontFamily: 'Segoe UI, sans-serif', button: { textTransform: 'none', fontWeight: 600 } },
+  shape: { borderRadius: 12 },
+  components: {
+    MuiButtonBase: { styleOverrides: { root: { cursor: 'default' } } },
+    MuiCssBaseline: {
+      styleOverrides: {
+        body: {
+          scrollbarColor: 'rgba(255, 255, 255, 0.2) transparent',
+          '&::-webkit-scrollbar, & *::-webkit-scrollbar': { width: 8, height: 8 },
+          '&::-webkit-scrollbar-track, & *::-webkit-scrollbar-track': { background: 'transparent' },
+          '&::-webkit-scrollbar-thumb, & *::-webkit-scrollbar-thumb': {
+            borderRadius: 8,
+            backgroundColor: 'rgba(255, 255, 255, 0.18)',
+            border: '2px solid transparent',
+            backgroundClip: 'padding-box'
+          },
+          '&::-webkit-scrollbar-thumb:hover, & *::-webkit-scrollbar-thumb:hover': {
+            backgroundColor: 'rgba(255, 255, 255, 0.35)'
+          },
+          '&::-webkit-scrollbar-thumb:active, & *::-webkit-scrollbar-thumb:active': {
+            backgroundColor: '#98baff'
+          },
+          '&::-webkit-scrollbar-button, & *::-webkit-scrollbar-button': {
+            display: 'none',
+            width: 0,
+            height: 0
+          },
+          '&::-webkit-scrollbar-corner, & *::-webkit-scrollbar-corner': { background: 'transparent' }
+        }
+      }
+    }
+  }
+});
 const labels: Record<VideoSession['phase'], string> = { IDLE: 'Chọn video rồi nhấn Lấy phụ đề.', EXTRACTING: 'Đang lấy phụ đề YouTube…', CAPTIONS_READY: '', BUFFERING: 'Đang chuẩn bị các pack đầu…', PLAYING: 'Đang phát · tiếp tục dịch nền', COMPLETE: 'Đã xử lý toàn bộ video', ERROR: 'Xử lý bị gián đoạn', NO_SUBTITLES: 'Video chưa có phụ đề khả dụng' };
 const stamp = (s: number) => `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, '0')}`;
 const filterCaptionLanguages = createFilterOptions<{ value: string; label: string }>({

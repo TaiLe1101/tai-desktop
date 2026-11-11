@@ -128,6 +128,16 @@ export class YoutubeSession {
     wc.on('did-fail-load', (_e, code, message, _url, mainFrame) => {
       if (mainFrame && code !== -3) { this.state.phase = 'ERROR'; this.state.error = `Không tải được YouTube: ${message}`; }
     });
+    wc.on('did-finish-load', () => {
+      void wc.insertCSS(`
+        ::-webkit-scrollbar { width: 8px !important; height: 8px !important; }
+        ::-webkit-scrollbar-track { background: transparent !important; }
+        ::-webkit-scrollbar-thumb { background-color: rgba(255, 255, 255, 0.2) !important; border-radius: 8px !important; border: 2px solid transparent !important; background-clip: padding-box !important; }
+        ::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, 0.35) !important; }
+        ::-webkit-scrollbar-button { display: none !important; width: 0 !important; height: 0 !important; }
+        ::-webkit-scrollbar-corner { background: transparent !important; }
+      `).catch(() => {});
+    });
     this.timer = setInterval(() => { void this.tick(); }, 400);
   }
   reset() { this.generation++; this.cancelCaptionWait(new Error('Video hoặc phiên lấy phụ đề đã thay đổi.')); this.released = false; this.buffering = false; this.loadedSubtitles = []; this.state = { ...emptySession(), captionRetryAt: this.captionCooldownUntil }; }

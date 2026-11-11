@@ -8,8 +8,6 @@ export interface EnvConfig {
   updateUrl: string;
 }
 
-let loaded = false;
-
 function parseEnv(content: string) {
   const lines = content.split(/\r?\n/);
   for (const raw of lines) {
@@ -22,24 +20,25 @@ function parseEnv(content: string) {
     if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
       val = val.slice(1, -1);
     }
-    if (!process.env[key]) {
-      process.env[key] = val;
-    }
+    process.env[key] = val;
   }
 }
 
 export function loadEnv(): EnvConfig {
-  if (loaded) return getEnvConfig();
-  loaded = true;
-
   const candidates: string[] = [
     join(process.cwd(), '.env'),
+    join(__dirname, '../../.env'),
+    join(__dirname, '../.env')
   ];
 
   try {
     if (app) {
       if (app.isPackaged) {
-        candidates.unshift(join(dirname(process.execPath), '.env'));
+        // Bundled defaults load before external files so local overrides still apply.
+        candidates.unshift(
+          join(process.resourcesPath, '.env'),
+          join(dirname(process.execPath), '.env')
+        );
       }
       candidates.push(join(app.getPath('userData'), '.env'));
     }
@@ -53,14 +52,14 @@ export function loadEnv(): EnvConfig {
     }
   }
 
-  return getEnvConfig();
-}
-
-export function getEnvConfig(): EnvConfig {
   return {
     workerUrl: (process.env.WORKER_URL || '').trim().replace(/\/+$/, ''),
     workerApiKey: (process.env.WORKER_API_KEY || '').trim(),
     updateUrl: (process.env.UPDATE_URL || '').trim().replace(/\/+$/, '')
   };
+}
+
+export function getEnvConfig(): EnvConfig {
+  return loadEnv();
 }
 

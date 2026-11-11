@@ -1,8 +1,8 @@
 {
   "name": "tai-desktop",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "description": "TAI Desktop - YouTube caption translation and AI voiceover",
-  "author": "TAI",
+  "author": "DevT",
   "private": true,
   "main": "./out/main/index.js",
   "scripts": {
@@ -33,6 +33,12 @@
     "files": [
       "out/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": ".env",
+        "to": ".env"
+      }
     ],
     "publish": {
       "provider": "generic",

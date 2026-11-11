@@ -92,6 +92,16 @@ export class AppUpdater {
   async checkForUpdates(): Promise<UpdateState> {
     if (this.checking) return this.getState();
     const env = getEnvConfig();
+    if (env.updateUrl) {
+      try {
+        autoUpdater.setFeedURL({
+          provider: 'generic',
+          url: env.updateUrl
+        });
+      } catch (e) {
+        console.error('Lỗi cấu hình feed URL updater:', e);
+      }
+    }
     if (!env.updateUrl) {
       this.updateState({
         phase: 'error',
@@ -102,7 +112,7 @@ export class AppUpdater {
     if (!app.isPackaged) {
       this.updateState({
         phase: 'error',
-        error: 'Chế độ phát triển (Dev): Hãy chạy trên bản đóng gói để kiểm tra cập nhật.'
+        error: `Chế độ phát triển (Dev): Đã nhận UPDATE_URL (${env.updateUrl}). Tự động cập nhật chỉ chạy trên bản cài đặt đóng gói (production).`
       });
       return this.getState();
     }
