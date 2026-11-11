@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile, rename, stat } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, stat, unlink, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { sourceLanguages, type SourceLanguage, type SubtitleSegment, type VoiceChunk } from '../shared/types';
 import { ensureAudioDirectory } from './storage';
@@ -45,11 +45,59 @@ export class VoiceoverService {
     if (!sourceLanguages.some(s => s.value === sourceLanguage)) throw new Error('Ngôn ngữ nguồn không hợp lệ.');
     const settings = this.settings();
     const profile = createHash('sha256').update(JSON.stringify([settings.targetLang, sourceLanguage, 'desktop-caption-source-v3'])).digest('hex').slice(0, 16);
-    return { settings, profile, key: `${profile}/${id}`, dir: join(this.root, profile, id) };
+    return { id, sourceLanguage, settings, profile, key: `${profile}/${id}`, dir: join(this.root, profile, id) };
+  }
+  private captionsFile(id: string, sourceLanguage: SourceLanguage) {
+    return join(this.root, 'captions', id, `${sourceLanguage}.json`);
   }
   private async subtitles(dir: string): Promise<SubtitleSegment[]> {
     try { return JSON.parse(await readFile(join(dir, 'subtitles.json'), 'utf8')); }
     catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return []; throw e; }
+  }
+  async getCachedSubtitles(id: string, sourceLanguage: SourceLanguage = 'en'): Promise<SubtitleSegment[] | null> {
+    try {
+      const primaryFile = this.captionsFile(id, sourceLanguage);
+      if (await exists(primaryFile)) {
+        const parsed = JSON.parse(await readFile(primaryFile, 'utf8'));
+        const normalized = normalizeTimeline(parsed);
+        if (normalized.length) return normalized;
+      }
+    } catch {}
+    try {
+      const ctx = this.context(id, sourceLanguage);
+      const fallback = await this.subtitles(ctx.dir);
+      if (fallback.length) return fallback;
+    } catch {}
+    return null;
+  }
+  async saveSubtitles(id: string, sourceLanguage: SourceLanguage, input: SubtitleSegment[]): Promise<void> {
+    const subs = normalizeTimeline(input);
+    if (!subs.length) return;
+    const json = JSON.stringify(subs);
+    const primaryPath = this.captionsFile(id, sourceLanguage);
+    await mkdir(join(this.root, 'captions', id), { recursive: true });
+    await writeFile(`${primaryPath}.tmp`, json);
+    await rename(`${primaryPath}.tmp`, primaryPath);
+
+    const ctx = this.context(id, sourceLanguage);
+    await mkdir(ctx.dir, { recursive: true });
+    await writeFile(join(ctx.dir, 'subtitles.json.tmp'), json);
+    await rename(join(ctx.dir, 'subtitles.json.tmp'), join(ctx.dir, 'subtitles.json'));
+  }
+  async clearSubtitles(id: string, sourceLanguage: SourceLanguage): Promise<void> {
+    const primaryPath = this.captionsFile(id, sourceLanguage);
+    await unlink(primaryPath).catch(() => {});
+    const ctx = this.context(id, sourceLanguage);
+    await unlink(join(ctx.dir, 'subtitles.json')).catch(() => {});
+    try {
+      const files = await readdir(ctx.dir);
+      for (const f of files) {
+        if (/^chunk_\d+\.mp3(\.tmp)?$/.test(f)) {
+          await unlink(join(ctx.dir, f)).catch(() => {});
+        }
+      }
+    } catch {}
+    this.errors.delete(ctx.key);
   }
   async start(id: string, input?: unknown, sourceLanguage: SourceLanguage = 'en') {
     if (this.changingDirectory) throw new ApiError(503, 'Đang đổi thư mục audio. Vui lòng thử lại sau.');
@@ -68,13 +116,20 @@ export class VoiceoverService {
     this.errors.delete(ctx.key);
     let subs = await this.subtitles(ctx.dir);
     if (!subs.length) {
+      const cached = await this.getCachedSubtitles(ctx.id, ctx.sourceLanguage);
+      if (cached?.length) {
+        subs = cached;
+        await mkdir(ctx.dir, { recursive: true });
+        await writeFile(join(ctx.dir, 'subtitles.json.tmp'), JSON.stringify(subs));
+        await rename(join(ctx.dir, 'subtitles.json.tmp'), join(ctx.dir, 'subtitles.json'));
+      }
+    }
+    if (!subs.length) {
       if (input === undefined || input === null) throw new ApiError(422, 'Không lấy được phụ đề từ YouTube. Hãy bật phụ đề và thử lại.');
       // Keep YouTube's exact cue boundaries, including short and overlapping cues.
       subs = normalizeTimeline(input);
       if (!subs.length) throw new ApiError(422, 'Video không có phụ đề có thể đọc.');
-      await mkdir(ctx.dir, { recursive: true });
-      await writeFile(join(ctx.dir, 'subtitles.json.tmp'), JSON.stringify(subs));
-      await rename(join(ctx.dir, 'subtitles.json.tmp'), join(ctx.dir, 'subtitles.json'));
+      await this.saveSubtitles(ctx.id, ctx.sourceLanguage, subs);
     }
     for (let i = 0; i < subs.length && !this.stopping; i++) {
       const file = join(ctx.dir, `chunk_${i}.mp3`);

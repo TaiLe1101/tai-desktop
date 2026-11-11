@@ -1,5 +1,9 @@
 export interface SubtitleSegment { start: number; end: number; text: string }
-export type SourceLanguage = 'en' | 'zh' | 'ja' | 'ko';
+// Language of the caption text received from YouTube Auto-translate.
+export type SourceLanguage = string;
+export function isCaptionLanguage(value: unknown): value is SourceLanguage {
+  return typeof value === 'string' && /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(value);
+}
 export const sourceLanguages: { value: SourceLanguage; label: string }[] = [
   { value: 'en', label: 'Tiếng Anh' }, { value: 'zh', label: 'Tiếng Trung' },
   { value: 'ja', label: 'Tiếng Nhật' }, { value: 'ko', label: 'Tiếng Hàn' }
@@ -32,6 +36,9 @@ export interface DesktopApi {
 }
 export interface VoiceChunk extends SubtitleSegment { id: number; ready: boolean }
 export interface VideoSession {
+  captionRetryAt?: number;
+  detectedSourceLanguage?: string;
+  captionLanguages?: { value: string; label: string }[];
   sourceLanguage?: SourceLanguage;
   navigationError?: string;
   videoId: string; title: string; phase: 'IDLE' | 'EXTRACTING' | 'CAPTIONS_READY' | 'BUFFERING' | 'PLAYING' | 'COMPLETE' | 'ERROR' | 'NO_SUBTITLES';

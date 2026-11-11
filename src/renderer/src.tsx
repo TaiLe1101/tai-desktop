@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ThemeProvider, createTheme, CssBaseline, Box, Typography, Button, IconButton, Stack, ButtonBase, TextField, LinearProgress, Alert, Switch, FormControlLabel, Paper, Divider, MenuItem } from '@mui/material';
+import { ThemeProvider, createTheme, CssBaseline, Box, Typography, Button, IconButton, Stack, ButtonBase, TextField, LinearProgress, Alert, Switch, FormControlLabel, Paper, Divider, MenuItem, Autocomplete, createFilterOptions } from '@mui/material';
 import YouTube from '@mui/icons-material/YouTube';
 import SettingsIcon from '@mui/icons-material/Settings';
 import ArrowBack from '@mui/icons-material/ArrowBack';
@@ -17,13 +17,18 @@ declare global { interface Window { tai: DesktopApi } }
 const theme = createTheme({ palette: { mode: 'dark', primary: { main: '#98baff' }, background: { default: '#0b1018', paper: '#141c28' } }, typography: { fontFamily: 'Segoe UI, sans-serif', button: { textTransform: 'none', fontWeight: 600 } }, shape: { borderRadius: 12 }, components: { MuiButtonBase: { styleOverrides: { root: { cursor: 'default' } } } } });
 const labels: Record<VideoSession['phase'], string> = { IDLE: 'Chọn video rồi nhấn Lấy phụ đề.', EXTRACTING: 'Đang lấy phụ đề YouTube…', CAPTIONS_READY: '', BUFFERING: 'Đang chuẩn bị các pack đầu…', PLAYING: 'Đang phát · tiếp tục dịch nền', COMPLETE: 'Đã xử lý toàn bộ video', ERROR: 'Xử lý bị gián đoạn', NO_SUBTITLES: 'Video chưa có phụ đề khả dụng' };
 const stamp = (s: number) => `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, '0')}`;
+const filterCaptionLanguages = createFilterOptions<{ value: string; label: string }>({
+  ignoreAccents: true, ignoreCase: true, trim: true,
+  stringify: language => `${language.label} ${language.value}`
+});
 function App() {
   const [screen, setScreen] = useState<'home' | 'youtube' | 'settings'>('home');
   const [session, setSession] = useState<VideoSession | null>(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [voice, setVoice] = useState(true);
-  const [sourceLanguage, setSourceLanguage] = useState<SourceLanguage>('en');
+  const [sourceLanguage, setSourceLanguage] = useState<SourceLanguage>('');
+  const languageChoice = useRef({ videoId: '', manual: false });
   const [form, setForm] = useState<SettingsInput>({ workerUrl: '', targetLang: 'vi', launchAtLogin: false });
   const [hasKey, setHasKey] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -47,6 +52,22 @@ function App() {
     return () => { dead = true; clearInterval(timer); player.current.stop(); };
   }, []);
   useEffect(() => {
+    const id = session?.videoId || '';
+    if (languageChoice.current.videoId !== id) {
+      languageChoice.current = { videoId: id, manual: false };
+      setSourceLanguage('');
+    }
+    if (languageChoice.current.manual || session?.phase !== 'IDLE') return;
+    const detected = session.detectedSourceLanguage || '';
+    if (!detected) return;
+    const choices = [...sourceLanguages, ...(session.captionLanguages || [])];
+    const base = detected.toLowerCase().split('-')[0];
+    const selected = choices.find(l => l.value.toLowerCase() === detected.toLowerCase())
+      || choices.find(l => l.value.toLowerCase() === base)
+      || (base === 'cmn' ? choices.find(l => l.value === 'zh-Hans' || l.value === 'zh') : undefined);
+    setSourceLanguage(selected?.value || detected);
+  }, [session?.videoId, session?.detectedSourceLanguage, session?.phase]);
+  useEffect(() => {
     if (screen !== 'youtube') { player.current.stop(); void window.tai.bounds(null); return; }
     const update = () => { if (slot.current) { const r = slot.current.getBoundingClientRect(); void window.tai.bounds({ x: r.x, y: r.y, width: r.width, height: r.height }); } };
     const observer = new ResizeObserver(update); if (slot.current) observer.observe(slot.current);
@@ -55,6 +76,12 @@ function App() {
   }, [screen]);
   async function openYoutube() { setScreen('youtube'); if (!opened) { setOpened(true); await run(() => window.tai.navigate('https://www.youtube.com')); } }
   const percent = session?.total ? Math.round(session.ready / session.total * 100) : 0;
+  const captionLanguages = [...sourceLanguages, ...(session?.captionLanguages || []).filter(language => !sourceLanguages.some(defaultLanguage => defaultLanguage.value === language.value))];
+  if (sourceLanguage && !captionLanguages.some(language => language.value === sourceLanguage)) {
+    let label = sourceLanguage;
+    try { label = new Intl.DisplayNames(['vi'], { type: 'language' }).of(sourceLanguage) || sourceLanguage; } catch {}
+    captionLanguages.push({ value: sourceLanguage, label });
+  }
   return <Box sx={{ height: '100%', display: 'flex' }}>
     <Stack sx={{ width: 88, borderRight: '1px solid #263242', alignItems: 'center', py: 3, gap: 3 }}>
       <Box sx={{ background: '#98baff', color: '#0b1018', p: 1.3, borderRadius: 3, fontWeight: 900, fontSize: 22 }}>T</Box>
@@ -85,10 +112,24 @@ function App() {
               <Typography sx={{ fontWeight: 600, mt: 2, mb: 1 }}>{session?.title || 'Chưa chọn video'}</Typography>
               {session?.phase !== 'CAPTIONS_READY' && <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>{session ? labels[session.phase] : 'Đang kết nối…'}</Typography>}
               {session && ['IDLE', 'EXTRACTING', 'CAPTIONS_READY', 'ERROR', 'NO_SUBTITLES'].includes(session.phase) && <Stack sx={{ gap: 1, mb: 2 }}>
-                <TextField select fullWidth size="small" label="Ngôn ngữ nguồn" value={sourceLanguage} disabled={session.phase === 'EXTRACTING'} onChange={e => setSourceLanguage(e.target.value as SourceLanguage)}>
-                  {sourceLanguages.map(language => <MenuItem key={language.value} value={language.value}>{language.label}</MenuItem>)}
-                </TextField>
-                <Button fullWidth variant="outlined" startIcon={<ClosedCaption/>} disabled={!session.videoId || session.phase === 'EXTRACTING'} onClick={() => void run(() => window.tai.loadSubtitles(session.videoId, sourceLanguage))}>{session.phase === 'EXTRACTING' ? 'Đang lấy phụ đề…' : 'Lấy phụ đề'}</Button>
+                <Autocomplete
+                  fullWidth size="small" openOnFocus autoHighlight
+                  options={captionLanguages}
+                  value={captionLanguages.find(language => language.value === sourceLanguage) || null}
+                  getOptionLabel={language => language.label}
+                  isOptionEqualToValue={(option, value) => option.value === value.value}
+                  filterOptions={filterCaptionLanguages}
+                  disabled={session.phase === 'EXTRACTING'}
+                  onChange={(_event, language) => { languageChoice.current = { videoId: session.videoId, manual: true }; setSourceLanguage(language?.value || ''); }}
+                  noOptionsText="Không tìm thấy ngôn ngữ"
+                  openText="Mở danh sách" closeText="Đóng danh sách"
+                  slotProps={{ listbox: { sx: {
+                    maxHeight: '216px', py: '8px', overflowY: 'auto',
+                    '& .MuiAutocomplete-option': { minHeight: '40px', height: '40px', py: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block', lineHeight: '40px' }
+                  } } }}
+                  renderInput={params => <TextField {...params} label="Dịch tự động YouTube sang" placeholder={session.detectedSourceLanguage ? 'Tìm ngôn ngữ…' : 'Chọn ngôn ngữ khi chưa nhận diện được…'}/>}
+                />
+                <Button fullWidth variant="outlined" startIcon={<ClosedCaption/>} disabled={!session.videoId || !sourceLanguage || session.phase === 'EXTRACTING'} onClick={() => { languageChoice.current = { videoId: session.videoId, manual: true }; void run(() => window.tai.loadSubtitles(session.videoId, sourceLanguage)); }}>{session.phase === 'EXTRACTING' ? 'Đang lấy phụ đề…' : 'Lấy phụ đề'}</Button>
                 <Button fullWidth variant="contained" startIcon={<Translate/>} disabled={!session.chunks.length || sourceLanguage !== (session.sourceLanguage || 'en') || !['CAPTIONS_READY', 'ERROR'].includes(session.phase)} onClick={() => void run(() => window.tai.startTranslation(session.videoId))}>Dịch</Button>
               </Stack>}
               {session?.phase === 'EXTRACTING' && <LinearProgress sx={{ mb: 2 }}/>}

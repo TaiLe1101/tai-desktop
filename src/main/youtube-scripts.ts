@@ -8,27 +8,67 @@ const readPlayerResponse = `function readPlayerResponse() {
    return typeof response === 'string' ? JSON.parse(response) : response;
  } catch { return null; }
 }`;
+const readTranslationLanguages = `function readTranslationLanguages(player, response) {
+ try {
+   const live = player?.getOption?.('captions', 'translationLanguages');
+   if (Array.isArray(live) && live.length) return live;
+ } catch {}
+ return response?.captions?.playerCaptionsTracklistRenderer?.translationLanguages || [];
+}`;
+const detectOriginalLanguage = `function detectOriginalLanguage(player, response) {
+ const code = value => {
+   if (typeof value !== 'string') return '';
+   const normalized = value.replace(/_/g, '-');
+   return /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(normalized) ? normalized : '';
+ };
+ const declared = code(response?.videoDetails?.defaultAudioLanguage)
+   || code(response?.microformat?.playerMicroformatRenderer?.defaultAudioLanguage)
+   || code(response?.snippet?.defaultAudioLanguage);
+ if (declared) return declared;
+ let audioTracks = [];
+ try { audioTracks = player?.getAvailableAudioTracks?.() || []; } catch {}
+ if (!Array.isArray(audioTracks)) audioTracks = [];
+ const audioCode = track => code(track?.languageCode || track?.language)
+   || code(track?.id?.split('.')[0]);
+ const original = audioTracks.find(t => t.isOriginal === true || t.is_original === true || t.audioIsOriginal === true);
+ if (audioCode(original)) return audioCode(original);
+ const captions = response?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+ const asrLanguages = [...new Set(captions.filter(t => t.kind === 'asr').map(t => code(t.languageCode)).filter(Boolean))];
+ if (asrLanguages.length === 1) return asrLanguages[0];
+ if (audioTracks.length === 1) return audioCode(audioTracks[0]);
+ // A translated caption, UI language or selected dub does not identify the original.
+ return '';
+}`;
 export const inspectVideo = `(() => {
  ${readPlayerResponse}
+ ${readTranslationLanguages}
+ ${detectOriginalLanguage}
  const v = document.querySelector('video');
  const r = readPlayerResponse();
  const id = new URL(location.href).searchParams.get('v') || location.pathname.match(/^\\/shorts\\/([^/]+)/)?.[1] || '';
  const ad = !!document.querySelector('.ad-showing');
+ const captionLanguages = r?.videoDetails?.videoId === id ? readTranslationLanguages(document.getElementById('movie_player'), r)
+   .filter(t => typeof t.languageCode === 'string')
+   .map(t => ({ value: t.languageCode, label: typeof t.languageName === 'string' ? t.languageName : t.languageName?.simpleText || t.languageName?.runs?.map(r => r.text).join('') || t.languageCode })) : [];
  return { id, title: r?.videoDetails?.videoId === id ? r.videoDetails.title : document.title,
+   captionLanguages,
+   detectedSourceLanguage: r?.videoDetails?.videoId === id ? detectOriginalLanguage(document.getElementById('movie_player'), r) : '',
    valid: !!v && r?.videoDetails?.videoId === id, ad, live: !!r?.videoDetails?.isLiveContent,
    time: v?.currentTime || 0, paused: v?.paused ?? true, rate: v?.playbackRate || 1,
    muted: v?.muted ?? false, volume: v?.volume ?? 1 };
 })()`;
-// Method 2: select a source track, then capture YouTube's own request.
+// Method 2: activate Auto-translate, then capture YouTube's own translated request.
 export function requestNativeCaptions(language = 'en', videoId = '') {
  return `(async () => {
  ${readPlayerResponse}
+ ${readTranslationLanguages}
  const language = ${JSON.stringify(language)};
  const expectedId = ${JSON.stringify(videoId)};
  const names = { en: 'Tiếng Anh', zh: 'Tiếng Trung', ja: 'Tiếng Nhật', ko: 'Tiếng Hàn' };
  const matches = code => {
-   const base = String(code || '').toLowerCase().split('-')[0];
-   return base === language || (language === 'zh' && base === 'cmn');
+   const normalized = String(code || '').toLowerCase();
+   const base = normalized.split('-')[0];
+   return normalized === language.toLowerCase() || base === language.toLowerCase() || (language === 'zh' && base === 'cmn');
  };
  const currentId = () => new URL(location.href).searchParams.get('v') || location.pathname.split('/shorts/')[1]?.split('/')[0];
  let button;
@@ -41,7 +81,7 @@ export function requestNativeCaptions(language = 'en', videoId = '') {
  const player = document.getElementById('movie_player');
  if (!player || typeof player.setOption !== 'function') throw new Error('YouTube Player chưa sẵn sàng chọn ngôn ngữ phụ đề.');
  player.loadModule?.('captions');
- let track;
+ let track, translation;
  for (let i = 0; i < 30; i++) {
    if (expectedId && currentId() !== expectedId) throw new Error('Video đã thay đổi trong khi chọn phụ đề.');
    const response = readPlayerResponse();
@@ -49,19 +89,30 @@ export function requestNativeCaptions(language = 'en', videoId = '') {
    const metadataTracks = response?.videoDetails?.videoId === currentId()
      ? response?.captions?.playerCaptionsTracklistRenderer?.captionTracks : [];
    const tracks = Array.isArray(liveTracks) && liveTracks.length ? liveTracks : (metadataTracks || []);
-   const candidates = tracks.filter(t => matches(t.languageCode) && !t.translationLanguage);
-   track = candidates.find(t => t.kind !== 'asr') || candidates[0];
-   if (track) break;
+   const candidates = tracks.filter(t => t.is_translatable !== false && t.isTranslatable !== false);
+   // Prefer YouTube's speech-recognition captions as translation input.
+   track = candidates.find(t => t.kind === 'asr') || candidates[0];
+   const languages = readTranslationLanguages(player, response);
+   translation = languages.find(t => t.languageCode === language) || (language === 'zh' ? languages.find(t => matches(t.languageCode)) : undefined);
+   if (track && (translation || (track.kind === 'asr' && matches(track.languageCode)))) break;
    await new Promise(resolve => setTimeout(resolve, 250));
  }
- if (!track) throw new Error('Video không có phụ đề nguồn ' + (names[language] || language) + '.');
- if (button.getAttribute('aria-pressed') === 'true') {
-   button.click();
-   await new Promise(resolve => setTimeout(resolve, 200));
- }
+ if (!track) throw new Error('Video chưa có phụ đề đầu vào để YouTube Dịch tự động.');
+ if (!translation && !(track.kind === 'asr' && matches(track.languageCode))) throw new Error('YouTube không có Dịch tự động sang ' + (names[language] || language) + ' cho video này.');
+ const translatedName = typeof translation?.languageName === 'string' ? translation.languageName : translation?.languageName?.simpleText || translation?.languageCode;
+ // The original ASR track already contains the requested language; do not
+ // request a second, redundant translation into that same language.
+ const translationLanguage = track.kind === 'asr' && matches(track.languageCode) ? null
+   : translation ? { ...translation, languageName: translatedName } : null;
+ let selected;
+ try { selected = player.getOption?.('captions', 'track'); } catch {}
+ const sameTrack = selected?.languageCode === track.languageCode
+   && (selected?.kind || '') === (track.kind || '')
+   && (selected?.translationLanguage?.languageCode || '') === (translationLanguage?.languageCode || '');
+ // YouTube supplies/signs the URL with tlang; do not synthesize a translated URL.
+ // Select before enabling CC to avoid first fetching the previous/default track.
+ if (!sameTrack) player.setOption('captions', 'track', { ...track, translationLanguage });
  if (button.getAttribute('aria-pressed') !== 'true') button.click();
- // Use the actual track object and clear auto-translation, never rewrite its URL.
- player.setOption('captions', 'track', { ...track, translationLanguage: null });
 })()`;
 }
 
@@ -79,13 +130,15 @@ export function fetchCapturedCaptions(capturedUrl: string, videoId: string, lang
  const url = new URL(${JSON.stringify(capturedUrl)});
  const expectedId = ${JSON.stringify(videoId)};
  const language = ${JSON.stringify(language)};
- const actual = (url.searchParams.get('lang') || '').toLowerCase().split('-')[0];
- if (url.searchParams.has('tlang') || !(actual === language || (language === 'zh' && actual === 'cmn'))) throw new Error('YouTube trả track khác ngôn ngữ nguồn đã chọn.');
+ const translated = url.searchParams.get('tlang');
+ const actual = (translated || (url.searchParams.get('kind') === 'asr' ? url.searchParams.get('lang') : '') || '').toLowerCase();
+ if (!(actual === language.toLowerCase() || (language === 'zh' && actual.split('-')[0] === 'zh'))) throw new Error('YouTube chưa trả phụ đề Dịch tự động đúng ngôn ngữ đã chọn.');
  const currentId = new URL(location.href).searchParams.get('v') || location.pathname.split('/shorts/')[1]?.split('/')[0];
  if (currentId !== expectedId || url.searchParams.get('v') !== expectedId) throw new Error('Video đã thay đổi trong khi lấy phụ đề.');
  if (url.protocol !== 'https:' || !(url.hostname === 'youtube.com' || url.hostname.endsWith('.youtube.com')) || url.pathname !== '/api/timedtext') throw new Error('URL phụ đề không hợp lệ.');
  // Replay the exact URL requested by YouTube, in the same cookie/origin context.
  const res = await fetch(url.href, { credentials: 'include', signal: AbortSignal.timeout(20000) });
+ if (res.status === 429) return { captionRateLimited: true, retryAfter: res.headers.get('retry-after') };
  if (!res.ok) throw new Error('Request phụ đề bắt được trả HTTP ' + res.status + '.');
  const raw = await res.text();
  if (!raw.trim()) throw new Error('Đã bắt được request timedtext nhưng YouTube vẫn trả body rỗng (cách 2).');
