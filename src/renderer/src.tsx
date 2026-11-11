@@ -128,84 +128,88 @@ function App() {
   const captionLanguages = [...sourceLanguages, ...(session?.captionLanguages || []).filter(language => !sourceLanguages.some(defaultLanguage => defaultLanguage.value === language.value))];
   if (sourceLanguage && !captionLanguages.some(language => language.value === sourceLanguage)) {
     let label = sourceLanguage;
-    try { label = new Intl.DisplayNames(['vi'], { type: 'language' }).of(sourceLanguage) || sourceLanguage; } catch {}
+    try { label = new Intl.DisplayNames(['vi'], { type: 'language' }).of(sourceLanguage) || sourceLanguage; } catch { }
     captionLanguages.push({ value: sourceLanguage, label });
   }
   return <Box sx={{ height: '100%', display: 'flex' }}>
     <Stack sx={{ width: 88, borderRight: '1px solid #263242', alignItems: 'center', py: 3, gap: 3 }}>
       <Box sx={{ background: '#98baff', color: '#0b1018', p: 1.3, borderRadius: 3, fontWeight: 900, fontSize: 22 }}>T</Box>
-      <IconButton aria-label="Trang chủ" onClick={() => setScreen('home')} color={screen === 'home' ? 'primary' : 'default'}><Home/></IconButton>
-      <IconButton aria-label="YouTube" onClick={() => void openYoutube()} color={screen === 'youtube' ? 'primary' : 'default'}><YouTube/></IconButton>
-      <Box sx={{ flex: 1 }}/><IconButton aria-label="Cấu hình" onClick={() => setScreen('settings')}><SettingsIcon/></IconButton>
-      <Typography variant="caption" color="text.secondary">v2.0.0</Typography>
+      <IconButton aria-label="Trang chủ" onClick={() => setScreen('home')} color={screen === 'home' ? 'primary' : 'default'}><Home /></IconButton>
+      <IconButton aria-label="YouTube" onClick={() => void openYoutube()} color={screen === 'youtube' ? 'primary' : 'default'}><YouTube /></IconButton>
+      <Box sx={{ flex: 1 }} /><IconButton aria-label="Cấu hình" onClick={() => setScreen('settings')}><SettingsIcon /></IconButton>
+      <Typography variant="caption" color="text.secondary">v{updateState.currentVersion}</Typography>
     </Stack>
     <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', p: screen === 'youtube' ? 1 : 3, gap: 2 }}>
       {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
       {screen === 'youtube' && session?.navigationError && <Alert severity="warning">{session.navigationError}</Alert>}
       {screen === 'home' && <Box aria-label="Nền tảng" sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, 100px)', alignContent: 'start', gap: 2, flex: 1 }}>
         <ButtonBase aria-label="Mở YouTube" onClick={() => void openYoutube()} sx={{ flexDirection: 'column', gap: 1, p: 1.5, borderRadius: 2, alignSelf: 'start', '&:hover': { bgcolor: 'action.hover' }, '&.Mui-focusVisible': { outline: '2px solid', outlineColor: 'primary.main' } }}>
-          <Box sx={{ width: 60, height: 60, borderRadius: 2, bgcolor: '#f53142', display: 'grid', placeItems: 'center', boxShadow: '0 4px 16px #0004' }}><YouTube sx={{ fontSize: 42, color: '#fff' }}/></Box>
+          <Box sx={{ width: 60, height: 60, borderRadius: 2, bgcolor: '#f53142', display: 'grid', placeItems: 'center', boxShadow: '0 4px 16px #0004' }}><YouTube sx={{ fontSize: 42, color: '#fff' }} /></Box>
           <Typography variant="body2">YouTube</Typography>
         </ButtonBase>
       </Box>}
       {screen === 'youtube' && <>
         <Box sx={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: `minmax(0, 1fr) ${panelExpanded ? 350 : 48}px`, gap: 1 }}>
-          <Box ref={slot} className="web-slot"/>
+          <Box ref={slot} className="web-slot" />
           <Paper variant="outlined" sx={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             <Stack direction="row" sx={{ alignItems: 'center', gap: 1, p: panelExpanded ? 1.5 : .5 }}>
-              {panelExpanded && <><ClosedCaption color="primary"/><Typography sx={{ fontWeight: 700, flex: 1 }}>Phụ đề & tiến trình</Typography></>}
-              <IconButton aria-label={panelExpanded ? 'Thu gọn phụ đề' : 'Mở rộng phụ đề'} title={panelExpanded ? 'Thu gọn phụ đề' : 'Mở rộng phụ đề'} aria-expanded={panelExpanded} onClick={() => { const expanded = !panelExpanded; setPanelExpanded(expanded); localStorage.setItem('tai:captions-expanded', String(expanded)); }}>{panelExpanded ? <ChevronRight/> : <ChevronLeft/>}</IconButton>
+              {panelExpanded && <><ClosedCaption color="primary" /><Typography sx={{ fontWeight: 700, flex: 1 }}>Phụ đề & tiến trình</Typography></>}
+              <IconButton aria-label={panelExpanded ? 'Thu gọn phụ đề' : 'Mở rộng phụ đề'} title={panelExpanded ? 'Thu gọn phụ đề' : 'Mở rộng phụ đề'} aria-expanded={panelExpanded} onClick={() => { const expanded = !panelExpanded; setPanelExpanded(expanded); localStorage.setItem('tai:captions-expanded', String(expanded)); }}>{panelExpanded ? <ChevronRight /> : <ChevronLeft />}</IconButton>
             </Stack>
             {panelExpanded && <>
-            <Box sx={{ px: 2, pb: 2 }}>
-              <Typography sx={{ fontWeight: 600, mt: 2, mb: 1 }}>{session?.title || 'Chưa chọn video'}</Typography>
-              {session?.phase !== 'CAPTIONS_READY' && <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>{session ? labels[session.phase] : 'Đang kết nối…'}</Typography>}
-              {session && ['IDLE', 'EXTRACTING', 'CAPTIONS_READY', 'ERROR', 'NO_SUBTITLES'].includes(session.phase) && <Stack sx={{ gap: 1, mb: 2 }}>
-                <Autocomplete
-                  fullWidth size="small" openOnFocus autoHighlight
-                  options={captionLanguages}
-                  value={captionLanguages.find(language => language.value === sourceLanguage) || null}
-                  getOptionLabel={language => language.label}
-                  isOptionEqualToValue={(option, value) => option.value === value.value}
-                  filterOptions={filterCaptionLanguages}
-                  disabled={session.phase === 'EXTRACTING'}
-                  onChange={(_event, language) => { languageChoice.current = { videoId: session.videoId, manual: true }; setSourceLanguage(language?.value || ''); }}
-                  noOptionsText="Không tìm thấy ngôn ngữ"
-                  openText="Mở danh sách" closeText="Đóng danh sách"
-                  slotProps={{ listbox: { sx: {
-                    maxHeight: '216px', py: '8px', overflowY: 'auto',
-                    '& .MuiAutocomplete-option': { minHeight: '40px', height: '40px', py: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block', lineHeight: '40px' }
-                  } } }}
-                  renderInput={params => <TextField {...params} label="Dịch tự động YouTube sang" placeholder={session.detectedSourceLanguage ? 'Tìm ngôn ngữ…' : 'Chọn ngôn ngữ khi chưa nhận diện được…'}/>}
-                />
-                <Stack direction="row" sx={{ gap: 1 }}>
-                  <Button fullWidth variant="outlined" startIcon={<ClosedCaption/>} disabled={!session.videoId || !sourceLanguage || session.phase === 'EXTRACTING'} onClick={() => { languageChoice.current = { videoId: session.videoId, manual: true }; void run(() => window.tai.loadSubtitles(session.videoId, sourceLanguage)); }}>{session.phase === 'EXTRACTING' ? 'Đang lấy phụ đề…' : 'Lấy phụ đề'}</Button>
-                  {session.phase === 'CAPTIONS_READY' && (
-                    <IconButton title="Lấy lại phụ đề mới từ YouTube (bỏ cache cũ)" aria-label="Lấy lại phụ đề mới từ YouTube" color="primary" onClick={() => { languageChoice.current = { videoId: session.videoId, manual: true }; void run(() => window.tai.loadSubtitles(session.videoId, sourceLanguage, true)); }}>
-                      <Refresh fontSize="small"/>
-                    </IconButton>
-                  )}
-                </Stack>
-                <Button fullWidth variant="contained" startIcon={<Translate/>} disabled={!session.chunks.length || sourceLanguage !== (session.sourceLanguage || 'en') || !['CAPTIONS_READY', 'ERROR'].includes(session.phase)} onClick={() => void run(() => window.tai.startTranslation(session.videoId))}>Dịch</Button>
-              </Stack>}
-              {session?.phase === 'EXTRACTING' && <LinearProgress sx={{ mb: 2 }}/>}
-              {session?.phase === 'NO_SUBTITLES' && <Alert severity="info">{session.error || 'YouTube chưa trả phụ đề khả dụng. Bạn có thể bấm Lấy phụ đề để thử lại.'}</Alert>}
-              {session?.phase === 'ERROR' && <Alert severity="error">{session.error}</Alert>}
-              {session && ['BUFFERING', 'PLAYING', 'COMPLETE'].includes(session.phase) && <>
-              <LinearProgress variant="determinate" value={percent}/>
-              <Stack direction="row" sx={{ justifyContent: "space-between", mt: 1 }}><Typography variant="caption">{session?.ready || 0}/{session?.total || 0} pack</Typography><Typography variant="caption">{percent}% {session?.cached ? '· Cache' : ''}</Typography></Stack>
-              <FormControlLabel control={<Switch checked={voice} onChange={e => { setVoice(e.target.checked); if (!e.target.checked) player.current.stop(); }}/>} label="Giọng dịch AI"/>
-              </>}
-            </Box><Divider/>
-            <Box className="subtitle-list">{!session?.chunks.length && <Typography color="text.secondary" variant="body2" sx={{ mt: 3 }}>Nhấn Lấy phụ đề để kiểm tra nội dung và mốc thời gian trước khi dịch.</Typography>}
-              {session?.chunks.map(c => <Box key={c.id} className={`cue ${session.time >= c.start && session.time < c.end ? 'active' : ''}`} role="button" tabIndex={0} onClick={() => void run(() => window.tai.playback('seek', c.start))} onKeyDown={e => { if (e.key === 'Enter') void run(() => window.tai.playback('seek', c.start)); }}><Stack direction="row" sx={{ justifyContent: "space-between" }}><Typography variant="caption" color="primary">{stamp(c.start)} — {stamp(c.end)}</Typography><Typography variant="caption" color={c.ready ? 'success.main' : 'text.secondary'}>{c.ready ? 'Sẵn sàng' : session.phase === 'CAPTIONS_READY' ? 'Chưa dịch' : 'Đang chờ'}</Typography></Stack><p>{c.text}</p></Box>)}
-            </Box>
+              <Box sx={{ px: 2, pb: 2 }}>
+                <Typography sx={{ fontWeight: 600, mt: 2, mb: 1 }}>{session?.title || 'Chưa chọn video'}</Typography>
+                {session?.phase !== 'CAPTIONS_READY' && <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>{session ? labels[session.phase] : 'Đang kết nối…'}</Typography>}
+                {session && ['IDLE', 'EXTRACTING', 'CAPTIONS_READY', 'ERROR', 'NO_SUBTITLES'].includes(session.phase) && <Stack sx={{ gap: 1, mb: 2 }}>
+                  <Autocomplete
+                    fullWidth size="small" openOnFocus autoHighlight
+                    options={captionLanguages}
+                    value={captionLanguages.find(language => language.value === sourceLanguage) || null}
+                    getOptionLabel={language => language.label}
+                    isOptionEqualToValue={(option, value) => option.value === value.value}
+                    filterOptions={filterCaptionLanguages}
+                    disabled={session.phase === 'EXTRACTING'}
+                    onChange={(_event, language) => { languageChoice.current = { videoId: session.videoId, manual: true }; setSourceLanguage(language?.value || ''); }}
+                    noOptionsText="Không tìm thấy ngôn ngữ"
+                    openText="Mở danh sách" closeText="Đóng danh sách"
+                    slotProps={{
+                      listbox: {
+                        sx: {
+                          maxHeight: '216px', py: '8px', overflowY: 'auto',
+                          '& .MuiAutocomplete-option': { minHeight: '40px', height: '40px', py: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block', lineHeight: '40px' }
+                        }
+                      }
+                    }}
+                    renderInput={params => <TextField {...params} label="Dịch tự động YouTube sang" placeholder={session.detectedSourceLanguage ? 'Tìm ngôn ngữ…' : 'Chọn ngôn ngữ khi chưa nhận diện được…'} />}
+                  />
+                  <Stack direction="row" sx={{ gap: 1 }}>
+                    <Button fullWidth variant="outlined" startIcon={<ClosedCaption />} disabled={!session.videoId || !sourceLanguage || session.phase === 'EXTRACTING'} onClick={() => { languageChoice.current = { videoId: session.videoId, manual: true }; void run(() => window.tai.loadSubtitles(session.videoId, sourceLanguage)); }}>{session.phase === 'EXTRACTING' ? 'Đang lấy phụ đề…' : 'Lấy phụ đề'}</Button>
+                    {session.phase === 'CAPTIONS_READY' && (
+                      <IconButton title="Lấy lại phụ đề mới từ YouTube (bỏ cache cũ)" aria-label="Lấy lại phụ đề mới từ YouTube" color="primary" onClick={() => { languageChoice.current = { videoId: session.videoId, manual: true }; void run(() => window.tai.loadSubtitles(session.videoId, sourceLanguage, true)); }}>
+                        <Refresh fontSize="small" />
+                      </IconButton>
+                    )}
+                  </Stack>
+                  <Button fullWidth variant="contained" startIcon={<Translate />} disabled={!session.chunks.length || sourceLanguage !== (session.sourceLanguage || 'en') || !['CAPTIONS_READY', 'ERROR'].includes(session.phase)} onClick={() => void run(() => window.tai.startTranslation(session.videoId))}>Dịch</Button>
+                </Stack>}
+                {session?.phase === 'EXTRACTING' && <LinearProgress sx={{ mb: 2 }} />}
+                {session?.phase === 'NO_SUBTITLES' && <Alert severity="info">{session.error || 'YouTube chưa trả phụ đề khả dụng. Bạn có thể bấm Lấy phụ đề để thử lại.'}</Alert>}
+                {session?.phase === 'ERROR' && <Alert severity="error">{session.error}</Alert>}
+                {session && ['BUFFERING', 'PLAYING', 'COMPLETE'].includes(session.phase) && <>
+                  <LinearProgress variant="determinate" value={percent} />
+                  <Stack direction="row" sx={{ justifyContent: "space-between", mt: 1 }}><Typography variant="caption">{session?.ready || 0}/{session?.total || 0} pack</Typography><Typography variant="caption">{percent}% {session?.cached ? '· Cache' : ''}</Typography></Stack>
+                  <FormControlLabel control={<Switch checked={voice} onChange={e => { setVoice(e.target.checked); if (!e.target.checked) player.current.stop(); }} />} label="Giọng dịch AI" />
+                </>}
+              </Box><Divider />
+              <Box className="subtitle-list">{!session?.chunks.length && <Typography color="text.secondary" variant="body2" sx={{ mt: 3 }}>Nhấn Lấy phụ đề để kiểm tra nội dung và mốc thời gian trước khi dịch.</Typography>}
+                {session?.chunks.map(c => <Box key={c.id} className={`cue ${session.time >= c.start && session.time < c.end ? 'active' : ''}`} role="button" tabIndex={0} onClick={() => void run(() => window.tai.playback('seek', c.start))} onKeyDown={e => { if (e.key === 'Enter') void run(() => window.tai.playback('seek', c.start)); }}><Stack direction="row" sx={{ justifyContent: "space-between" }}><Typography variant="caption" color="primary">{stamp(c.start)} — {stamp(c.end)}</Typography><Typography variant="caption" color={c.ready ? 'success.main' : 'text.secondary'}>{c.ready ? 'Sẵn sàng' : session.phase === 'CAPTIONS_READY' ? 'Chưa dịch' : 'Đang chờ'}</Typography></Stack><p>{c.text}</p></Box>)}
+              </Box>
             </>}
           </Paper>
         </Box>
       </>}
       {screen === 'settings' && <Box sx={{ maxWidth: 760, width: '100%', mx: 'auto', overflow: 'auto', pb: 4 }}>
-        <Button startIcon={<ArrowBack/>} onClick={() => setScreen(opened ? 'youtube' : 'home')}>Quay lại</Button>
+        <Button startIcon={<ArrowBack />} onClick={() => setScreen(opened ? 'youtube' : 'home')}>Quay lại</Button>
         <Typography variant="h4" sx={{ my: 3 }}>Cài đặt ứng dụng</Typography>
         <Paper component="form" variant="outlined" sx={{ p: 3 }} onSubmit={e => { e.preventDefault(); setSaving(true); void run(async () => { await window.tai.save(form); setForm({ ...form, apiKey: undefined }); setHasKey((await window.tai.settings()).hasApiKey); setNotice('Đã lưu cấu hình.'); }).finally(() => setSaving(false)); }}>
           <Stack sx={{ gap: 3 }}>
@@ -214,7 +218,7 @@ function App() {
                 URL Worker đã được cấu hình từ biến môi trường <strong>.env</strong> (WORKER_URL: {form.workerUrl || 'Đã cấu hình'}).
               </Alert>
             ) : (
-              <TextField label="URL worker" placeholder="https://your-worker.trycloudflare.com" value={form.workerUrl} onChange={e => setForm({ ...form, workerUrl: e.target.value })}/>
+              <TextField label="URL worker" placeholder="https://your-worker.trycloudflare.com" value={form.workerUrl} onChange={e => setForm({ ...form, workerUrl: e.target.value })} />
             )}
             <TextField select label="Ngôn ngữ dịch" value={form.targetLang} onChange={e => setForm({ ...form, targetLang: e.target.value })}>{[['vi', 'Tiếng Việt'], ['en', 'English'], ['ja', '日本語']].map(([v, l]) => <MenuItem key={v} value={v}>{l}</MenuItem>)}</TextField>
             {envInfo.isApiKeyFromEnv ? (
@@ -223,41 +227,41 @@ function App() {
               </Alert>
             ) : (
               <>
-                <TextField label="Worker access key" type="password" autoComplete="off" value={form.apiKey || ''} helperText={hasKey ? 'Đã lưu an toàn. Để trống để giữ key hiện tại.' : 'WORKER_API_KEY của worker, không phải Gemini API key.'} onChange={e => setForm({ ...form, apiKey: e.target.value || undefined })}/>
+                <TextField label="Worker access key" type="password" autoComplete="off" value={form.apiKey || ''} helperText={hasKey ? 'Đã lưu an toàn. Để trống để giữ key hiện tại.' : 'WORKER_API_KEY của worker, không phải Gemini API key.'} onChange={e => setForm({ ...form, apiKey: e.target.value || undefined })} />
                 <Button onClick={() => setForm({ ...form, apiKey: '' })}>Xóa key khi lưu</Button>
               </>
             )}
-            <FormControlLabel control={<Switch checked={form.launchAtLogin} onChange={e => setForm({ ...form, launchAtLogin: e.target.checked })}/>} label="Khởi động cùng Windows"/>
-            <Button type="submit" variant="contained" startIcon={<Translate/>} disabled={saving}>Lưu cấu hình</Button>
+            <FormControlLabel control={<Switch checked={form.launchAtLogin} onChange={e => setForm({ ...form, launchAtLogin: e.target.checked })} />} label="Khởi động cùng Windows" />
+            <Button type="submit" variant="contained" startIcon={<Translate />} disabled={saving}>Lưu cấu hình</Button>
             {notice && <Alert severity="success">{notice}</Alert>}
           </Stack>
         </Paper>
         <Paper variant="outlined" sx={{ p: 3, mt: 3 }}>
           <Typography sx={{ fontWeight: 700 }}>Cache trên máy</Typography>
           <Typography variant="body2" sx={{ my: 2, overflowWrap: 'anywhere' }}>{cache}</Typography>
-          <Stack direction="row" sx={{ gap: 2 }}><Button startIcon={<FolderOpen/>} onClick={() => void run(() => window.tai.openCache())}>Mở thư mục</Button><Button onClick={() => void run(async () => { const p = await window.tai.chooseAudioDirectory(); if (p) setCache(p); })}>Đổi thư mục</Button></Stack>
+          <Stack direction="row" sx={{ gap: 2 }}><Button startIcon={<FolderOpen />} onClick={() => void run(() => window.tai.openCache())}>Mở thư mục</Button><Button onClick={() => void run(async () => { const p = await window.tai.chooseAudioDirectory(); if (p) setCache(p); })}>Đổi thư mục</Button></Stack>
         </Paper>
         <Paper variant="outlined" sx={{ p: 3, mt: 3 }}>
           <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
             <Box>
               <Typography sx={{ fontWeight: 700 }}>Cập nhật ứng dụng</Typography>
               <Typography variant="body2" color="text.secondary">
-                Phiên bản hiện tại: v{updateState.currentVersion || '2.0.0'}
+                Phiên bản hiện tại: v{updateState.currentVersion}
               </Typography>
             </Box>
             <Button
               variant="outlined"
-              startIcon={<SystemUpdate/>}
+              startIcon={<SystemUpdate />}
               disabled={updateState.phase === 'checking' || updateState.phase === 'downloading'}
               onClick={() => void run(async () => { await window.tai.checkUpdate(); })}
             >
               {updateState.phase === 'checking' ? 'Đang kiểm tra…' : 'Kiểm tra cập nhật'}
             </Button>
           </Stack>
-          {updateState.phase === 'checking' && <LinearProgress sx={{ my: 1 }}/>}
+          {updateState.phase === 'checking' && <LinearProgress sx={{ my: 1 }} />}
           {updateState.phase === 'not-available' && (
             <Alert severity="success" sx={{ mt: 1 }}>
-              Bạn đang sử dụng phiên bản mới nhất (v{updateState.version || updateState.currentVersion || '2.0.0'}).
+              Bạn đang sử dụng phiên bản mới nhất (v{updateState.version || updateState.currentVersion}).
             </Alert>
           )}
           {updateState.phase === 'available' && (
@@ -279,7 +283,7 @@ function App() {
                 <Typography variant="body2">Đang tải bản cập nhật…</Typography>
                 <Typography variant="body2" sx={{ fontWeight: 600 }}>{updateState.progress || 0}%</Typography>
               </Stack>
-              <LinearProgress variant="determinate" value={updateState.progress || 0}/>
+              <LinearProgress variant="determinate" value={updateState.progress || 0} />
               {updateState.bytesPerSecond ? (
                 <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
                   Tốc độ: {((updateState.bytesPerSecond) / 1024 / 1024).toFixed(1)} MB/s
@@ -329,4 +333,4 @@ function App() {
     </Box>
   </Box>;
 }
-createRoot(document.getElementById('root')!).render(<ThemeProvider theme={theme}><CssBaseline/><App/></ThemeProvider>);
+createRoot(document.getElementById('root')!).render(<ThemeProvider theme={theme}><CssBaseline /><App /></ThemeProvider>);

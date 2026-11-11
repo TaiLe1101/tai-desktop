@@ -30,7 +30,7 @@ else {
     await ensureAudioDirectory(settings.getAudioDirectory());
     service = new VoiceoverService(settings.getAudioDirectory(), () => settings.worker());
     window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 680,
-      title: 'TAI Desktop 2.0.0', backgroundColor: '#0b1018', autoHideMenuBar: true,
+      title: 'TAI Desktop', backgroundColor: '#0b1018', autoHideMenuBar: true,
       webPreferences: { preload: join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.on('close', event => { if (!quitting) { event.preventDefault(); app.quit(); } });
