@@ -3,4 +3,5 @@ out/
 release/
 *.log
 .env*
+!.env.example
 .venv/

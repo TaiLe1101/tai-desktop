@@ -4,12 +4,14 @@ import { SettingsStore } from './settings';
 import { VoiceoverService } from './voiceover';
 import { ensureAudioDirectory } from './storage';
 import { YoutubeSession } from './youtube';
+import { AppUpdater } from './updater';
 import type { SettingsInput } from '../shared/types';
 
 app.setName('TAI Desktop');
 let window: BrowserWindow;
 let youtube: YoutubeSession;
 let service: VoiceoverService;
+let updater: AppUpdater;
 let quitting = false;
 const settings = new SettingsStore();
 if (!app.requestSingleInstanceLock()) app.quit();
@@ -34,6 +36,8 @@ else {
     window.on('close', event => { if (!quitting) { event.preventDefault(); app.quit(); } });
     window.webContents.on('will-navigate', e => e.preventDefault());
     youtube = new YoutubeSession(window, service);
+    updater = new AppUpdater();
+    updater.setWindow(window);
     function handle(channel: string, action: (...args: any[]) => unknown) {
       ipcMain.handle(channel, (event, ...args) => {
         if (event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('IPC sender không hợp lệ.');
@@ -63,6 +67,10 @@ else {
       await service.changeAudioDirectory(result.filePaths[0], () => settings.setAudioDirectory(result.filePaths[0]));
       youtube.reset(); return service.root;
     });
+    handle('tai:check-update', () => updater.checkForUpdates());
+    handle('tai:download-update', () => updater.downloadUpdate());
+    handle('tai:install-update', () => updater.installUpdate());
+    setTimeout(() => { void updater.checkForUpdates(); }, 5000);
     if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) await window.loadURL(process.env.ELECTRON_RENDERER_URL);
     else await window.loadFile(join(__dirname, '../renderer/index.html'));
   }).catch(error => { dialog.showErrorBox('Không khởi động được TAI Desktop', error.message); app.quit(); });

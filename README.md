@@ -1,6 +1,21 @@
-﻿# TAI Desktop 2.0.0
+# TAI Desktop 2.0.0
 
 Ứng dụng Electron + React + Material UI để xem YouTube và dịch/lồng tiếng trực tiếp qua AI worker. Không cần extension, tai-be, yt-dlp hoặc local HTTP server.
+
+## Cấu hình môi trường (.env)
+
+Tạo file `.env` từ `.env.example` để cấu hình các thông số kết nối:
+
+```env
+# Backend lưu trữ bản cập nhật ứng dụng (phục vụ latest.yml và file setup .exe)
+UPDATE_URL=https://your-backend.com/updates/
+
+# Cấu hình AI Worker
+WORKER_URL=https://your-worker.trycloudflare.com
+WORKER_API_KEY=your_worker_access_key_here
+```
+
+Khi đã khai báo trong `.env`, ứng dụng sẽ tự động sử dụng các cấu hình này mà không cần nhập lại trên giao diện. Màn hình Cài đặt chỉ giữ các thiết lập cơ bản (Khởi động cùng Windows, Thư mục Cache trên máy, và Nút Kiểm tra cập nhật).
 
 ## Chạy
 
@@ -12,9 +27,9 @@ npm install
 npm run dev
 ```
 
-Vào **Cấu hình**: nhập URL worker HTTPS (HTTP chỉ cho localhost), Worker access key và ngôn ngữ `vi`, `en` hoặc `ja`. Dùng worker hiện có trong `../tai-worker`, endpoint `POST /process-tts`, request `{text,target_lang}`, response `audio/mpeg`. Desktop không cần Gemini key. Worker phải đang chạy và có cấu hình dịch/TTS hợp lệ.
+Dùng worker hiện có trong `../tai-worker`, endpoint `POST /process-tts`, request `{text,target_lang}`, response `audio/mpeg`. Desktop không cần Gemini key. Worker phải đang chạy và có cấu hình dịch/TTS hợp lệ.
 
-Menu chính là grid biểu tượng ứng dụng. Chọn **YouTube**, tìm và mở video ngay trong webview. Nhấn **Lấy phụ đề** để đọc trực tiếp từ YouTube và hiển thị nội dung/start/end, không dùng cache và không gọi worker. Sau khi lấy thành công, nhấn **Dịch** để kiểm tra cache và bắt đầu xử lý AI. Có thể bấm **Lấy phụ đề** lại để kiểm tra nguồn YouTube. Mở nền tảng hoặc chuyển video không tự xử lý. Màn hình nền tảng không có header hoặc thanh địa chỉ riêng.
+Menu chính là grid biểu tượng ứng dụng. Chọn **YouTube**, tìm và mở video ngay trong webview. Nhấn **Lấy phụ đề** để đọc phụ đề: nếu đã có trong cache máy thì nạp ngay lập tức (< 10ms, không tốn request mạng), nếu chưa có sẽ đọc từ YouTube và tự động lưu vào máy. Khi phụ đề đã sẵn sàng, có nút **Làm mới** (icon Refresh) bên cạnh để chủ động xóa cache cũ và tải lại bản mới nhất từ YouTube. Sau khi có phụ đề, nhấn **Dịch** để kiểm tra cache và bắt đầu xử lý AI. Mở nền tảng hoặc chuyển video không tự xử lý. Màn hình nền tảng không có header hoặc thanh địa chỉ riêng.
 
 ## Luồng v2
 
@@ -53,11 +68,12 @@ Worker lỗi sẽ dừng job và hiển thị lỗi; **Thử lại / tiếp tụ
 Cấu hình ở Electron userData (`%APPDATA%/TAI Desktop/settings.json`); key được mã hóa bằng safeStorage. Có thể chọn thư mục cache trong Cấu hình. Cache v2:
 
 ```text
+<audioDirectory>/captions/<videoId>/<sourceLanguage>.json
 <audioDirectory>/<profile>/<videoId>/subtitles.json
 <audioDirectory>/<profile>/<videoId>/chunk_<index>.mp3
 ```
 
-Profile gồm ngôn ngữ phụ đề nhận từ YouTube, ngôn ngữ đích của worker và phiên bản pipeline Dịch tự động; không phụ thuộc URL tunnel. Đổi ngôn ngữ tạo cache riêng. Cache track nguồn của chế độ trước không được dùng cho Dịch tự động; file cũ vẫn giữ trên ổ đĩa. Đổi model/voice trên cùng worker cần dọn cache liên quan khi app đã thoát. Cache không tự hết hạn hoặc tự nhận diện việc tác giả sửa phụ đề. Chọn thư mục mới không di chuyển file cũ.
+Phụ đề nguồn được lưu độc lập theo `<videoId>` và `<sourceLanguage>` trong thư mục `captions`, tự động dùng lại cho mọi cấu hình worker mà không cần fetch lại từ YouTube. Profile gồm ngôn ngữ phụ đề nhận từ YouTube, ngôn ngữ đích của worker và phiên bản pipeline Dịch tự động; không phụ thuộc URL tunnel. Đổi ngôn ngữ tạo cache riêng. Cache track nguồn của chế độ trước không được dùng cho Dịch tự động; file cũ vẫn giữ trên ổ đĩa. Đổi model/voice trên cùng worker cần dọn cache liên quan khi app đã thoát. Nút Làm mới phụ đề sẽ xóa cache phụ đề cũ và các file audio chunk cũ liên quan. Chọn thư mục mới không di chuyển file cũ.
 
 YouTube chạy trong WebContentsView không có Node, không có preload/API IPC của desktop. Worker key không được đưa vào YouTube hoặc renderer. Điều hướng trang chính giới hạn HTTPS YouTube và các địa chỉ đăng nhập/consent, chuyển cookie Google đã liệt kê trong `canNavigate`. Không áp danh sách điều hướng trang chính cho redirect của iframe. Popup đăng nhập hợp lệ mở cửa sổ con sandbox với cùng session, giữ nguyên opener và luồng POST. Nếu app chặn một chuyển hướng, UI chỉ hiển thị hostname, không hiện query/token đăng nhập. App không inject script player vào trang xác thực và không throttle timer của webview khi cửa sổ ở nền. Từ chối download và các quyền ngoài fullscreen của YouTube. IPC chỉ nhận từ main frame của giao diện desktop. Đóng cửa sổ sẽ ghi session/cookie xuống ổ đĩa rồi thoát app và hủy request worker đang chạy; không mở local server hoặc chạy trong tray.
 
@@ -80,6 +96,17 @@ npm test
 npm run build
 npm run dist:win
 ```
+
+### Phát hành bản cập nhật lên Backend riêng
+
+Khi bạn cần phát hành phiên bản mới:
+1. Tăng version trong `package.json` (ví dụ `"version": "2.0.1"`).
+2. Chạy lệnh đóng gói: `npm run dist:win`.
+3. Thư mục `release/` sẽ sinh ra 2 file chính:
+   - `latest.yml`
+   - `TAI Desktop Setup 2.0.1.exe`
+4. Upload 2 file này lên Backend của bạn tại địa chỉ tương ứng với `UPDATE_URL`.
+5. Ứng dụng client sẽ tự động kiểm tra (hoặc khi bấm *Kiểm tra cập nhật* trong Cài đặt), hiển thị thông báo bản mới và chỉ tải/cài đặt khi người dùng bấm xác nhận.
 
 Tests dùng worker giả lập kiểm tra cache, key, retry, giữ timestamp, phân tách ngôn ngữ, ngưỡng 20%, bộ đọc JSON3 và chống dùng player response cũ khi chuyển video. Chưa thay thế kiểm thử với YouTube/Colab thật.
 

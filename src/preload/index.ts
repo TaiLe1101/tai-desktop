@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { DesktopApi } from '../shared/types';
+import type { DesktopApi, UpdateState } from '../shared/types';
 const api: DesktopApi = {
   voice: enabled => ipcRenderer.invoke('tai:voice', enabled),
   navigate: url => ipcRenderer.invoke('tai:navigate', url),
@@ -14,6 +14,14 @@ const api: DesktopApi = {
   save: input => ipcRenderer.invoke('tai:save', input),
   status: () => ipcRenderer.invoke('tai:status'),
   openCache: () => ipcRenderer.invoke('tai:open-cache'),
-  chooseAudioDirectory: () => ipcRenderer.invoke('tai:choose-audio-directory')
+  chooseAudioDirectory: () => ipcRenderer.invoke('tai:choose-audio-directory'),
+  checkUpdate: () => ipcRenderer.invoke('tai:check-update'),
+  downloadUpdate: () => ipcRenderer.invoke('tai:download-update'),
+  installUpdate: () => ipcRenderer.invoke('tai:install-update'),
+  onUpdateStatus: listener => {
+    const handler = (_event: unknown, state: UpdateState) => listener(state);
+    ipcRenderer.on('tai:update-status', handler);
+    return () => { ipcRenderer.removeListener('tai:update-status', handler); };
+  }
 };
 contextBridge.exposeInMainWorld('tai', api);

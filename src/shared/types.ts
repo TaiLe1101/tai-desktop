@@ -8,8 +8,27 @@ export const sourceLanguages: { value: SourceLanguage; label: string }[] = [
   { value: 'en', label: 'Tiếng Anh' }, { value: 'zh', label: 'Tiếng Trung' },
   { value: 'ja', label: 'Tiếng Nhật' }, { value: 'ko', label: 'Tiếng Hàn' }
 ];
-export interface Settings { workerUrl: string; targetLang: string; launchAtLogin: boolean }
+export interface Settings {
+  workerUrl: string;
+  targetLang: string;
+  launchAtLogin: boolean;
+  isWorkerFromEnv?: boolean;
+  isApiKeyFromEnv?: boolean;
+  hasUpdateUrl?: boolean;
+}
 export interface SettingsInput extends Settings { apiKey?: string }
+export type UpdatePhase = 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
+export interface UpdateState {
+  phase: UpdatePhase;
+  currentVersion?: string;
+  version?: string;
+  releaseNotes?: string;
+  progress?: number;
+  bytesPerSecond?: number;
+  transferred?: number;
+  total?: number;
+  error?: string;
+}
 export interface Status {
   running: boolean;
   error: string;
@@ -33,6 +52,10 @@ export interface DesktopApi {
   status(): Promise<Status>;
   openCache(): Promise<void>;
   chooseAudioDirectory(): Promise<string | null>;
+  checkUpdate(): Promise<UpdateState>;
+  downloadUpdate(): Promise<void>;
+  installUpdate(): Promise<void>;
+  onUpdateStatus(listener: (state: UpdateState) => void): () => void;
 }
 export interface VoiceChunk extends SubtitleSegment { id: number; ready: boolean }
 export interface VideoSession {

@@ -1,6 +1,7 @@
 import { app, safeStorage } from 'electron';
 import { readFile, writeFile, rename } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
+import { loadEnv, getEnvConfig } from './env';
 import type { Settings, SettingsInput } from '../shared/types';
 
 export function validateSettings(input: SettingsInput): SettingsInput {
@@ -20,8 +21,9 @@ export class SettingsStore {
   private encryptedKey = '';
   private audioDirectory = '';
   private saving = false;
-  private file = join(app.getPath('userData'), 'settings.json');
+  private file = join(app?.getPath ? app.getPath('userData') : process.cwd(), 'settings.json');
   async load() {
+    loadEnv();
     try {
       const data = JSON.parse(await readFile(this.file, 'utf8'));
       this.value = validateSettings(data);
@@ -33,14 +35,27 @@ export class SettingsStore {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Không đọc được settings.json. Hãy kiểm tra file trong thư mục dữ liệu TAI Desktop.');
     }
   }
-  publicValue() { return { ...this.value, hasApiKey: Boolean(this.encryptedKey) }; }
-  getAudioDirectory() { return this.audioDirectory || join(app.getPath('userData'), 'audio'); }
+  publicValue() {
+    const env = getEnvConfig();
+    return {
+      ...this.value,
+      workerUrl: env.workerUrl || this.value.workerUrl,
+      hasApiKey: Boolean(env.workerApiKey || this.encryptedKey),
+      isWorkerFromEnv: Boolean(env.workerUrl),
+      isApiKeyFromEnv: Boolean(env.workerApiKey),
+      hasUpdateUrl: Boolean(env.updateUrl)
+    };
+  }
+  getAudioDirectory() { return this.audioDirectory || (app?.getPath ? join(app.getPath('userData'), 'audio') : join(process.cwd(), 'audio')); }
   async setAudioDirectory(directory: string) {
     if (!isAbsolute(directory)) throw new Error('Cần chọn đường dẫn thư mục tuyệt đối.');
     await this.persist(this.value, this.encryptedKey, directory);
   }
   worker() {
-    return { ...this.value, apiKey: this.encryptedKey ? safeStorage.decryptString(Buffer.from(this.encryptedKey, 'base64')) : '' };
+    const env = getEnvConfig();
+    const workerUrl = env.workerUrl || this.value.workerUrl;
+    const apiKey = env.workerApiKey || (this.encryptedKey ? safeStorage.decryptString(Buffer.from(this.encryptedKey, 'base64')) : '');
+    return { ...this.value, workerUrl, apiKey };
   }
   async save(input: SettingsInput) {
     const { apiKey, ...value } = validateSettings(input);
