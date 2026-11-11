@@ -1,0 +1,7 @@
+﻿html,body,#root { margin:0; height:100%; overflow:hidden; }
+* { box-sizing:border-box; }
+.web-slot { flex:1; min-height:0; background:#111923; border-radius:12px; }
+.subtitle-list { overflow:auto; flex:1; min-height:0; padding:8px 16px; }
+.cue { padding:12px; margin-bottom:8px; border:1px solid #263242; border-radius:10px;  content-visibility:auto; contain-intrinsic-size:auto 100px; }
+.cue.active { border-color:#8ab4ff; background:#1c2b43; }
+.cue p { margin:6px 0 0; line-height:1.5; font-size:14px; }
