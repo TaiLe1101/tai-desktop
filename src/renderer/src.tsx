@@ -4,29 +4,32 @@ import { ThemeProvider, createTheme, CssBaseline, Box, Typography, Button, IconB
 import YouTube from '@mui/icons-material/YouTube';
 import SettingsIcon from '@mui/icons-material/Settings';
 import ArrowBack from '@mui/icons-material/ArrowBack';
-import Refresh from '@mui/icons-material/Refresh';
 import Home from '@mui/icons-material/Home';
 import ClosedCaption from '@mui/icons-material/ClosedCaption';
 import Translate from '@mui/icons-material/Translate';
 import FolderOpen from '@mui/icons-material/FolderOpen';
-import type { DesktopApi, SettingsInput, VideoSession } from '../shared/types';
+import ChevronLeft from '@mui/icons-material/ChevronLeft';
+import ChevronRight from '@mui/icons-material/ChevronRight';
+import { sourceLanguages, type SourceLanguage, type DesktopApi, type SettingsInput, type VideoSession } from '../shared/types';
 import { VoicePlayer } from './player';
 import './style.css';
 declare global { interface Window { tai: DesktopApi } }
 const theme = createTheme({ palette: { mode: 'dark', primary: { main: '#98baff' }, background: { default: '#0b1018', paper: '#141c28' } }, typography: { fontFamily: 'Segoe UI, sans-serif', button: { textTransform: 'none', fontWeight: 600 } }, shape: { borderRadius: 12 }, components: { MuiButtonBase: { styleOverrides: { root: { cursor: 'default' } } } } });
-const labels: Record<VideoSession['phase'], string> = { IDLE: 'Chọn một video để bắt đầu', EXTRACTING: 'Đang lấy phụ đề YouTube…', BUFFERING: 'Đang chuẩn bị các pack đầu…', PLAYING: 'Đang phát · tiếp tục dịch nền', COMPLETE: 'Đã xử lý toàn bộ video', ERROR: 'Xử lý bị gián đoạn', NO_SUBTITLES: 'Video chưa có phụ đề khả dụng' };
+const labels: Record<VideoSession['phase'], string> = { IDLE: 'Chọn video rồi nhấn Lấy phụ đề.', EXTRACTING: 'Đang lấy phụ đề YouTube…', CAPTIONS_READY: '', BUFFERING: 'Đang chuẩn bị các pack đầu…', PLAYING: 'Đang phát · tiếp tục dịch nền', COMPLETE: 'Đã xử lý toàn bộ video', ERROR: 'Xử lý bị gián đoạn', NO_SUBTITLES: 'Video chưa có phụ đề khả dụng' };
 const stamp = (s: number) => `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, '0')}`;
 function App() {
   const [screen, setScreen] = useState<'home' | 'youtube' | 'settings'>('home');
   const [session, setSession] = useState<VideoSession | null>(null);
-    const [error, setError] = useState('');
+  const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [voice, setVoice] = useState(true);
+  const [sourceLanguage, setSourceLanguage] = useState<SourceLanguage>('en');
   const [form, setForm] = useState<SettingsInput>({ workerUrl: '', targetLang: 'vi', launchAtLogin: false });
   const [hasKey, setHasKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [cache, setCache] = useState('');
   const [opened, setOpened] = useState(false);
+  const [panelExpanded, setPanelExpanded] = useState(() => localStorage.getItem('tai:captions-expanded') !== 'false');
   const slot = useRef<HTMLDivElement>(null);
   const player = useRef(new VoicePlayer());
   const activeVoice = useRef(false);
@@ -62,6 +65,7 @@ function App() {
     </Stack>
     <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', p: screen === 'youtube' ? 1 : 3, gap: 2 }}>
       {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
+      {screen === 'youtube' && session?.navigationError && <Alert severity="warning">{session.navigationError}</Alert>}
       {screen === 'home' && <Box aria-label="Nền tảng" sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, 100px)', alignContent: 'start', gap: 2, flex: 1 }}>
         <ButtonBase aria-label="Mở YouTube" onClick={() => void openYoutube()} sx={{ flexDirection: 'column', gap: 1, p: 1.5, borderRadius: 2, alignSelf: 'start', '&:hover': { bgcolor: 'action.hover' }, '&.Mui-focusVisible': { outline: '2px solid', outlineColor: 'primary.main' } }}>
           <Box sx={{ width: 60, height: 60, borderRadius: 2, bgcolor: '#f53142', display: 'grid', placeItems: 'center', boxShadow: '0 4px 16px #0004' }}><YouTube sx={{ fontSize: 42, color: '#fff' }}/></Box>
@@ -69,26 +73,37 @@ function App() {
         </ButtonBase>
       </Box>}
       {screen === 'youtube' && <>
-        <Box sx={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 350px', gap: 2 }}>
+        <Box sx={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: `minmax(0, 1fr) ${panelExpanded ? 350 : 48}px`, gap: 1 }}>
           <Box ref={slot} className="web-slot"/>
           <Paper variant="outlined" sx={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            <Box sx={{ p: 2 }}><Stack direction="row" sx={{ alignItems: "center", gap: 1 }}><ClosedCaption color="primary"/><Typography sx={{ fontWeight: 700 }}>Phụ đề & tiến trình</Typography></Stack>
+            <Stack direction="row" sx={{ alignItems: 'center', gap: 1, p: panelExpanded ? 1.5 : .5 }}>
+              {panelExpanded && <><ClosedCaption color="primary"/><Typography sx={{ fontWeight: 700, flex: 1 }}>Phụ đề & tiến trình</Typography></>}
+              <IconButton aria-label={panelExpanded ? 'Thu gọn phụ đề' : 'Mở rộng phụ đề'} title={panelExpanded ? 'Thu gọn phụ đề' : 'Mở rộng phụ đề'} aria-expanded={panelExpanded} onClick={() => { const expanded = !panelExpanded; setPanelExpanded(expanded); localStorage.setItem('tai:captions-expanded', String(expanded)); }}>{panelExpanded ? <ChevronRight/> : <ChevronLeft/>}</IconButton>
+            </Stack>
+            {panelExpanded && <>
+            <Box sx={{ px: 2, pb: 2 }}>
               <Typography sx={{ fontWeight: 600, mt: 2, mb: 1 }}>{session?.title || 'Chưa chọn video'}</Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>{session?.phase === 'IDLE' && session.videoId ? 'Nhấn Dịch để bắt đầu xử lý video này.' : session ? labels[session.phase] : 'Đang kết nối…'}</Typography>
-              {session?.phase === 'IDLE' && <Button fullWidth variant="contained" startIcon={<Translate/>} disabled={!session.videoId} sx={{ mb: 2 }} onClick={() => void run(() => window.tai.startTranslation(session.videoId))}>Dịch</Button>}
-              {session?.phase !== 'IDLE' && <>
-              <LinearProgress variant={session?.phase === 'EXTRACTING' ? 'indeterminate' : 'determinate'} value={percent}/>
-              <Stack direction="row" sx={{ justifyContent: "space-between", mt: 1 }}><Typography variant="caption">{session?.ready || 0}/{session?.total || 0} pack</Typography><Typography variant="caption">{percent}% {session?.cached ? '· Cache' : ''}</Typography></Stack>
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>Phát từ 0:00 khi đủ {session?.initialRequired || '20%'} pack đầu. Các pack còn lại tiếp tục xử lý.</Typography>
-              <FormControlLabel control={<Switch checked={voice} onChange={e => { setVoice(e.target.checked); if (!e.target.checked) player.current.stop(); }}/>} label="Giọng dịch AI"/>
-              {session?.phase === 'NO_SUBTITLES' && <Alert severity="info">{session.error || 'Bật CC trên YouTube rồi thử lại. V2 chưa xử lý video không có phụ đề.'}</Alert>}
+              {session?.phase !== 'CAPTIONS_READY' && <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>{session ? labels[session.phase] : 'Đang kết nối…'}</Typography>}
+              {session && ['IDLE', 'EXTRACTING', 'CAPTIONS_READY', 'ERROR', 'NO_SUBTITLES'].includes(session.phase) && <Stack sx={{ gap: 1, mb: 2 }}>
+                <TextField select fullWidth size="small" label="Ngôn ngữ nguồn" value={sourceLanguage} disabled={session.phase === 'EXTRACTING'} onChange={e => setSourceLanguage(e.target.value as SourceLanguage)}>
+                  {sourceLanguages.map(language => <MenuItem key={language.value} value={language.value}>{language.label}</MenuItem>)}
+                </TextField>
+                <Button fullWidth variant="outlined" startIcon={<ClosedCaption/>} disabled={!session.videoId || session.phase === 'EXTRACTING'} onClick={() => void run(() => window.tai.loadSubtitles(session.videoId, sourceLanguage))}>{session.phase === 'EXTRACTING' ? 'Đang lấy phụ đề…' : 'Lấy phụ đề'}</Button>
+                <Button fullWidth variant="contained" startIcon={<Translate/>} disabled={!session.chunks.length || sourceLanguage !== (session.sourceLanguage || 'en') || !['CAPTIONS_READY', 'ERROR'].includes(session.phase)} onClick={() => void run(() => window.tai.startTranslation(session.videoId))}>Dịch</Button>
+              </Stack>}
+              {session?.phase === 'EXTRACTING' && <LinearProgress sx={{ mb: 2 }}/>}
+              {session?.phase === 'NO_SUBTITLES' && <Alert severity="info">{session.error || 'YouTube chưa trả phụ đề khả dụng. Bạn có thể bấm Lấy phụ đề để thử lại.'}</Alert>}
               {session?.phase === 'ERROR' && <Alert severity="error">{session.error}</Alert>}
-              {session && ['ERROR', 'NO_SUBTITLES'].includes(session.phase) && <Button size="small" startIcon={<Refresh/>} onClick={() => void run(() => window.tai.retry())}>Thử lại / tiếp tục</Button>}
+              {session && ['BUFFERING', 'PLAYING', 'COMPLETE'].includes(session.phase) && <>
+              <LinearProgress variant="determinate" value={percent}/>
+              <Stack direction="row" sx={{ justifyContent: "space-between", mt: 1 }}><Typography variant="caption">{session?.ready || 0}/{session?.total || 0} pack</Typography><Typography variant="caption">{percent}% {session?.cached ? '· Cache' : ''}</Typography></Stack>
+              <FormControlLabel control={<Switch checked={voice} onChange={e => { setVoice(e.target.checked); if (!e.target.checked) player.current.stop(); }}/>} label="Giọng dịch AI"/>
               </>}
             </Box><Divider/>
-            <Box className="subtitle-list">{!session?.chunks.length && <Typography color="text.secondary" variant="body2" sx={{ mt: 3 }}>Chọn video trên YouTube rồi nhấn Dịch để xem phụ đề và tiến trình.</Typography>}
-              {session?.chunks.map(c => <Box key={c.id} className={`cue ${session.time >= c.start && session.time < c.end ? 'active' : ''}`} role="button" tabIndex={0} onClick={() => void run(() => window.tai.playback('seek', c.start))} onKeyDown={e => { if (e.key === 'Enter') void run(() => window.tai.playback('seek', c.start)); }}><Stack direction="row" sx={{ justifyContent: "space-between" }}><Typography variant="caption" color="primary">{stamp(c.start)} — {stamp(c.end)}</Typography><Typography variant="caption" color={c.ready ? 'success.main' : 'text.secondary'}>{c.ready ? 'Sẵn sàng' : 'Đang chờ'}</Typography></Stack><p>{c.text}</p></Box>)}
+            <Box className="subtitle-list">{!session?.chunks.length && <Typography color="text.secondary" variant="body2" sx={{ mt: 3 }}>Nhấn Lấy phụ đề để kiểm tra nội dung và mốc thời gian trước khi dịch.</Typography>}
+              {session?.chunks.map(c => <Box key={c.id} className={`cue ${session.time >= c.start && session.time < c.end ? 'active' : ''}`} role="button" tabIndex={0} onClick={() => void run(() => window.tai.playback('seek', c.start))} onKeyDown={e => { if (e.key === 'Enter') void run(() => window.tai.playback('seek', c.start)); }}><Stack direction="row" sx={{ justifyContent: "space-between" }}><Typography variant="caption" color="primary">{stamp(c.start)} — {stamp(c.end)}</Typography><Typography variant="caption" color={c.ready ? 'success.main' : 'text.secondary'}>{c.ready ? 'Sẵn sàng' : session.phase === 'CAPTIONS_READY' ? 'Chưa dịch' : 'Đang chờ'}</Typography></Stack><p>{c.text}</p></Box>)}
             </Box>
+            </>}
           </Paper>
         </Box>
       </>}

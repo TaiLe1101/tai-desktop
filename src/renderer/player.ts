@@ -11,16 +11,18 @@ export class VoicePlayer {
   async sync(s: VideoSession, enabled: boolean) {
     const chunk = s.chunks.find(c => c.ready && s.time >= c.start && s.time < c.end);
     if (!enabled || !chunk || !['PLAYING', 'COMPLETE'].includes(s.phase)) { this.stop(); return; }
-    const key = `${s.videoId}/${chunk.id}`;
+    const key = `${s.videoId}/${s.sourceLanguage || 'en'}/${chunk.id}`;
     if (key !== this.key) {
       this.stop(); this.key = key; this.loading = true;
       const token = this.generation;
       try {
-        const bytes = await window.tai.audio(s.videoId, chunk.id);
+        const bytes = await window.tai.audio(s.videoId, chunk.id, s.sourceLanguage);
         if (token !== this.generation) return;
         this.url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: 'audio/mpeg' }));
         this.audio = new Audio(this.url); this.audio.preload = 'auto'; this.audio.load();
-      } catch (e) { if (!this.failed.has(key)) { this.failed.add(key); console.error(e); } }
+      } catch (e) {
+        if (!this.failed.has(key)) { this.failed.add(key); throw new Error('Không tải được giọng dịch của đoạn này.'); }
+      }
       finally { if (token === this.generation) this.loading = false; }
     }
     const a = this.audio;

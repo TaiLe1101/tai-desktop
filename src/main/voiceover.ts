@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { SubtitleSegment, VoiceChunk } from '../shared/types';
+import { sourceLanguages, type SourceLanguage, type SubtitleSegment, type VoiceChunk } from '../shared/types';
 import { ensureAudioDirectory } from './storage';
 import { ApiError, videoId } from './errors';
 export { ApiError, videoId } from './errors';
@@ -40,19 +40,20 @@ export class VoiceoverService {
       this.lastError = '';
     } finally { this.changingDirectory = false; }
   }
-  private context(id: string) {
+  private context(id: string, sourceLanguage: SourceLanguage = 'en') {
     videoId(id);
+    if (!sourceLanguages.some(s => s.value === sourceLanguage)) throw new Error('Ngôn ngữ nguồn không hợp lệ.');
     const settings = this.settings();
-    const profile = createHash('sha256').update(JSON.stringify([settings.targetLang, 'desktop-caption-v2'])).digest('hex').slice(0, 16);
+    const profile = createHash('sha256').update(JSON.stringify([settings.targetLang, sourceLanguage, 'desktop-caption-source-v3'])).digest('hex').slice(0, 16);
     return { settings, profile, key: `${profile}/${id}`, dir: join(this.root, profile, id) };
   }
   private async subtitles(dir: string): Promise<SubtitleSegment[]> {
     try { return JSON.parse(await readFile(join(dir, 'subtitles.json'), 'utf8')); }
     catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return []; throw e; }
   }
-  async start(id: string, input?: unknown) {
+  async start(id: string, input?: unknown, sourceLanguage: SourceLanguage = 'en') {
     if (this.changingDirectory) throw new ApiError(503, 'Đang đổi thư mục audio. Vui lòng thử lại sau.');
-    const ctx = this.context(id);
+    const ctx = this.context(id, sourceLanguage);
     if (this.jobs.has(ctx.key)) return { status: 'PROCESSING' };
     if (this.stopping || this.jobs.size >= 4) throw new ApiError(429, 'Đang xử lý nhiều video. Vui lòng thử lại sau.');
     // Register before the first await so simultaneous starts cannot overwrite a timeline.
@@ -109,14 +110,14 @@ export class VoiceoverService {
     for (const c of this.controllers) c.abort();
     await Promise.allSettled(this.jobs.values());
   }
-  async snapshot(id: string) {
-    const ctx = this.context(id);
+  async snapshot(id: string, sourceLanguage: SourceLanguage = 'en') {
+    const ctx = this.context(id, sourceLanguage);
     const subs = await this.subtitles(ctx.dir);
     const chunks: VoiceChunk[] = await Promise.all(subs.map(async (s, id) => ({ ...s, id, ready: await exists(join(ctx.dir, `chunk_${id}.mp3`)) })));
     return { chunks, error: this.errors.get(ctx.key) || '', processing: this.jobs.has(ctx.key) };
   }
-  async readAudio(id: string, chunk: number) {
+  async readAudio(id: string, chunk: number, sourceLanguage: SourceLanguage = 'en') {
     if (!Number.isInteger(chunk) || chunk < 0 || chunk >= 20000) throw new Error('Pack không hợp lệ.');
-    return readFile(join(this.context(id).dir, `chunk_${chunk}.mp3`));
+    return readFile(join(this.context(id, sourceLanguage).dir, `chunk_${chunk}.mp3`));
   }
 }

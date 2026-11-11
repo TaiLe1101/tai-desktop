@@ -1,4 +1,9 @@
 export interface SubtitleSegment { start: number; end: number; text: string }
+export type SourceLanguage = 'en' | 'zh' | 'ja' | 'ko';
+export const sourceLanguages: { value: SourceLanguage; label: string }[] = [
+  { value: 'en', label: 'Tiếng Anh' }, { value: 'zh', label: 'Tiếng Trung' },
+  { value: 'ja', label: 'Tiếng Nhật' }, { value: 'ko', label: 'Tiếng Hàn' }
+];
 export interface Settings { workerUrl: string; targetLang: string; launchAtLogin: boolean }
 export interface SettingsInput extends Settings { apiKey?: string }
 export interface Status {
@@ -16,8 +21,9 @@ export interface DesktopApi {
   playback(action: 'pause' | 'play' | 'seek', time?: number): Promise<void>;
   session(): Promise<VideoSession>;
   startTranslation(videoId: string): Promise<void>;
+  loadSubtitles(videoId: string, sourceLanguage?: SourceLanguage): Promise<void>;
   retry(): Promise<void>;
-  audio(videoId: string, chunk: number): Promise<Uint8Array>;
+  audio(videoId: string, chunk: number, sourceLanguage?: SourceLanguage): Promise<Uint8Array>;
   settings(): Promise<Settings & { hasApiKey: boolean }>;
   save(input: SettingsInput): Promise<void>;
   status(): Promise<Status>;
@@ -26,7 +32,9 @@ export interface DesktopApi {
 }
 export interface VoiceChunk extends SubtitleSegment { id: number; ready: boolean }
 export interface VideoSession {
-  videoId: string; title: string; phase: 'IDLE' | 'EXTRACTING' | 'BUFFERING' | 'PLAYING' | 'COMPLETE' | 'ERROR' | 'NO_SUBTITLES';
+  sourceLanguage?: SourceLanguage;
+  navigationError?: string;
+  videoId: string; title: string; phase: 'IDLE' | 'EXTRACTING' | 'CAPTIONS_READY' | 'BUFFERING' | 'PLAYING' | 'COMPLETE' | 'ERROR' | 'NO_SUBTITLES';
   error: string; chunks: VoiceChunk[]; ready: number; total: number; initialRequired: number;
   time: number; paused: boolean; rate: number; muted: boolean; volume: number; cached: boolean;
 }

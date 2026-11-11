@@ -19,7 +19,9 @@ else {
   app.on('before-quit', event => {
     if (quitting || !service) return;
     event.preventDefault(); quitting = true;
-    youtube?.close(); void service.stop().finally(() => app.quit());
+    void Promise.allSettled([youtube?.persistSession(), service.stop()]).then(() => {
+      youtube?.close(); app.quit();
+    });
   });
   void app.whenReady().then(async () => {
     await settings.load();
@@ -29,6 +31,7 @@ else {
       title: 'TAI Desktop 2.0.0', backgroundColor: '#0b1018', autoHideMenuBar: true,
       webPreferences: { preload: join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    window.on('close', event => { if (!quitting) { event.preventDefault(); app.quit(); } });
     window.webContents.on('will-navigate', e => e.preventDefault());
     youtube = new YoutubeSession(window, service);
     function handle(channel: string, action: (...args: any[]) => unknown) {
@@ -43,8 +46,9 @@ else {
     handle('tai:playback', (action, time) => youtube.playback(action, time));
     handle('tai:session', () => youtube.state);
     handle('tai:start-translation', id => youtube.startTranslation(id));
+    handle('tai:load-subtitles', (id, language) => youtube.loadSubtitles(id, language));
     handle('tai:retry', () => youtube.retry());
-    handle('tai:audio', (id, chunk) => service.readAudio(id, chunk));
+    handle('tai:audio', (id, chunk, language) => service.readAudio(id, chunk, language));
     handle('tai:settings', () => settings.publicValue());
     handle('tai:save', async (input: SettingsInput) => {
       if (service.activeJobs) throw new Error('Chờ xử lý xong trước khi đổi cấu hình.');
