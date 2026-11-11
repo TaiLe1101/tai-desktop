@@ -1,18 +1,18 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { createRoot } from 'react-dom/client';
-import { ThemeProvider, createTheme, CssBaseline, Box, Typography, Button, IconButton, Stack, ButtonBase, TextField, LinearProgress, Alert, Switch, FormControlLabel, Paper, Divider, MenuItem, Autocomplete, createFilterOptions, Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions } from '@mui/material';
-import YouTube from '@mui/icons-material/YouTube';
-import SettingsIcon from '@mui/icons-material/Settings';
 import ArrowBack from '@mui/icons-material/ArrowBack';
-import Home from '@mui/icons-material/Home';
-import ClosedCaption from '@mui/icons-material/ClosedCaption';
-import Translate from '@mui/icons-material/Translate';
-import FolderOpen from '@mui/icons-material/FolderOpen';
 import ChevronLeft from '@mui/icons-material/ChevronLeft';
 import ChevronRight from '@mui/icons-material/ChevronRight';
+import ClosedCaption from '@mui/icons-material/ClosedCaption';
+import FolderOpen from '@mui/icons-material/FolderOpen';
+import Home from '@mui/icons-material/Home';
 import Refresh from '@mui/icons-material/Refresh';
+import SettingsIcon from '@mui/icons-material/Settings';
 import SystemUpdate from '@mui/icons-material/SystemUpdate';
-import { sourceLanguages, type SourceLanguage, type DesktopApi, type SettingsInput, type VideoSession, type UpdateState } from '../shared/types';
+import Translate from '@mui/icons-material/Translate';
+import YouTube from '@mui/icons-material/YouTube';
+import { Alert, Autocomplete, Box, Button, ButtonBase, createFilterOptions, createTheme, CssBaseline, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle, Divider, FormControlLabel, IconButton, LinearProgress, MenuItem, Paper, Stack, Switch, TextField, ThemeProvider, Typography } from '@mui/material';
+import { useEffect, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import { sourceLanguages, type DesktopApi, type SettingsInput, type SourceLanguage, type UpdateState, type VideoSession } from '../shared/types';
 import { VoicePlayer } from './player';
 import './style.css';
 declare global { interface Window { tai: DesktopApi } }
@@ -137,7 +137,7 @@ function App() {
       <IconButton aria-label="Trang chủ" onClick={() => setScreen('home')} color={screen === 'home' ? 'primary' : 'default'}><Home /></IconButton>
       <IconButton aria-label="YouTube" onClick={() => void openYoutube()} color={screen === 'youtube' ? 'primary' : 'default'}><YouTube /></IconButton>
       <Box sx={{ flex: 1 }} /><IconButton aria-label="Cấu hình" onClick={() => setScreen('settings')}><SettingsIcon /></IconButton>
-      <Typography variant="caption" color="text.secondary">v{updateState.currentVersion}</Typography>
+      <Typography variant="caption" color="text.secondary">v{updateState.version}</Typography>
     </Stack>
     <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', p: screen === 'youtube' ? 1 : 3, gap: 2 }}>
       {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
@@ -213,24 +213,7 @@ function App() {
         <Typography variant="h4" sx={{ my: 3 }}>Cài đặt ứng dụng</Typography>
         <Paper component="form" variant="outlined" sx={{ p: 3 }} onSubmit={e => { e.preventDefault(); setSaving(true); void run(async () => { await window.tai.save(form); setForm({ ...form, apiKey: undefined }); setHasKey((await window.tai.settings()).hasApiKey); setNotice('Đã lưu cấu hình.'); }).finally(() => setSaving(false)); }}>
           <Stack sx={{ gap: 3 }}>
-            {envInfo.isWorkerFromEnv ? (
-              <Alert severity="info" variant="outlined">
-                URL Worker đã được cấu hình từ biến môi trường <strong>.env</strong> (WORKER_URL: {form.workerUrl || 'Đã cấu hình'}).
-              </Alert>
-            ) : (
-              <TextField label="URL worker" placeholder="https://your-worker.trycloudflare.com" value={form.workerUrl} onChange={e => setForm({ ...form, workerUrl: e.target.value })} />
-            )}
             <TextField select label="Ngôn ngữ dịch" value={form.targetLang} onChange={e => setForm({ ...form, targetLang: e.target.value })}>{[['vi', 'Tiếng Việt'], ['en', 'English'], ['ja', '日本語']].map(([v, l]) => <MenuItem key={v} value={v}>{l}</MenuItem>)}</TextField>
-            {envInfo.isApiKeyFromEnv ? (
-              <Alert severity="info" variant="outlined">
-                Worker access key đã được cấu hình từ biến môi trường <strong>.env</strong> (WORKER_API_KEY).
-              </Alert>
-            ) : (
-              <>
-                <TextField label="Worker access key" type="password" autoComplete="off" value={form.apiKey || ''} helperText={hasKey ? 'Đã lưu an toàn. Để trống để giữ key hiện tại.' : 'WORKER_API_KEY của worker, không phải Gemini API key.'} onChange={e => setForm({ ...form, apiKey: e.target.value || undefined })} />
-                <Button onClick={() => setForm({ ...form, apiKey: '' })}>Xóa key khi lưu</Button>
-              </>
-            )}
             <FormControlLabel control={<Switch checked={form.launchAtLogin} onChange={e => setForm({ ...form, launchAtLogin: e.target.checked })} />} label="Khởi động cùng Windows" />
             <Button type="submit" variant="contained" startIcon={<Translate />} disabled={saving}>Lưu cấu hình</Button>
             {notice && <Alert severity="success">{notice}</Alert>}
@@ -246,7 +229,7 @@ function App() {
             <Box>
               <Typography sx={{ fontWeight: 700 }}>Cập nhật ứng dụng</Typography>
               <Typography variant="body2" color="text.secondary">
-                Phiên bản hiện tại: v{updateState.currentVersion}
+                Phiên bản hiện tại: v{updateState.version}
               </Typography>
             </Box>
             <Button
@@ -261,7 +244,7 @@ function App() {
           {updateState.phase === 'checking' && <LinearProgress sx={{ my: 1 }} />}
           {updateState.phase === 'not-available' && (
             <Alert severity="success" sx={{ mt: 1 }}>
-              Bạn đang sử dụng phiên bản mới nhất (v{updateState.version || updateState.currentVersion}).
+              Bạn đang sử dụng phiên bản mới nhất (v{updateState.version}).
             </Alert>
           )}
           {updateState.phase === 'available' && (
