@@ -137,7 +137,7 @@ function App() {
       <IconButton aria-label="Trang chủ" onClick={() => setScreen('home')} color={screen === 'home' ? 'primary' : 'default'}><Home /></IconButton>
       <IconButton aria-label="YouTube" onClick={() => void openYoutube()} color={screen === 'youtube' ? 'primary' : 'default'}><YouTube /></IconButton>
       <Box sx={{ flex: 1 }} /><IconButton aria-label="Cấu hình" onClick={() => setScreen('settings')}><SettingsIcon /></IconButton>
-      <Typography variant="caption" color="text.secondary">v{updateState.version}</Typography>
+      <Typography variant="caption" color="text.secondary">{updateState.currentVersion ? `v${updateState.currentVersion}` : ''}</Typography>
     </Stack>
     <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', p: screen === 'youtube' ? 1 : 3, gap: 2 }}>
       {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
@@ -229,7 +229,7 @@ function App() {
             <Box>
               <Typography sx={{ fontWeight: 700 }}>Cập nhật ứng dụng</Typography>
               <Typography variant="body2" color="text.secondary">
-                Phiên bản hiện tại: v{updateState.version}
+                Phiên bản hiện tại: {updateState.currentVersion ? `v${updateState.currentVersion}` : 'Đang xác định…'}
               </Typography>
             </Box>
             <Button
@@ -244,7 +244,7 @@ function App() {
           {updateState.phase === 'checking' && <LinearProgress sx={{ my: 1 }} />}
           {updateState.phase === 'not-available' && (
             <Alert severity="success" sx={{ mt: 1 }}>
-              Bạn đang sử dụng phiên bản mới nhất (v{updateState.version}).
+              Không có bản cập nhật mới hơn cho phiên bản hiện tại (v{updateState.currentVersion}).
             </Alert>
           )}
           {updateState.phase === 'available' && (
