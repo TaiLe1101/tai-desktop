@@ -1,4 +1,4 @@
-﻿// Runs only inside the isolated, unprivileged YouTube WebContents.
+// Runs only inside the isolated, unprivileged YouTube WebContents.
 // executeJavaScript runs in YouTube's main world. Read the live player only.
 const readPlayerResponse = `function readPlayerResponse() {
  const player = document.getElementById('movie_player');
@@ -39,7 +39,61 @@ const detectOriginalLanguage = `function detectOriginalLanguage(player, response
  // A translated caption, UI language or selected dub does not identify the original.
  return '';
 }`;
+const interceptCaptions = `(() => {
+  if (window.__taiCaptionsHooked) return;
+  window.__taiCaptionsHooked = true;
+  window.__taiCapturedCaptions = window.__taiCapturedCaptions || {};
+  try {
+    const origFetch = window.fetch;
+    window.fetch = async function(...args) {
+      const res = await origFetch.apply(this, args);
+      try {
+        const u = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
+        if (typeof u === 'string' && u.includes('/api/timedtext')) {
+          const clone = res.clone();
+          clone.text().then(text => {
+            if (text) {
+              window.__taiCapturedCaptions[u] = text;
+              try {
+                const parsed = new URL(u, location.href);
+                const v = parsed.searchParams.get('v');
+                const tlang = parsed.searchParams.get('tlang');
+                const lang = parsed.searchParams.get('lang');
+                if (v) window.__taiCapturedCaptions[v + '/' + (tlang || lang || '')] = text;
+              } catch {}
+            }
+          }).catch(() => {});
+        }
+      } catch {}
+      return res;
+    };
+    const origOpen = XMLHttpRequest.prototype.open;
+    const origSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+      this.__taiUrl = url;
+      return origOpen.call(this, method, url, ...rest);
+    };
+    XMLHttpRequest.prototype.send = function(...args) {
+      this.addEventListener('load', () => {
+        try {
+          if (typeof this.__taiUrl === 'string' && this.__taiUrl.includes('/api/timedtext') && this.responseText) {
+            window.__taiCapturedCaptions[this.__taiUrl] = this.responseText;
+            try {
+              const parsed = new URL(this.__taiUrl, location.href);
+              const v = parsed.searchParams.get('v');
+              const tlang = parsed.searchParams.get('tlang');
+              const lang = parsed.searchParams.get('lang');
+              if (v) window.__taiCapturedCaptions[v + '/' + (tlang || lang || '')] = this.responseText;
+            } catch {}
+          }
+        } catch {}
+      });
+      return origSend.apply(this, args);
+    };
+  } catch {}
+})()`;
 export const inspectVideo = `(() => {
+ ${interceptCaptions}
  ${readPlayerResponse}
  ${readTranslationLanguages}
  ${detectOriginalLanguage}
@@ -60,6 +114,7 @@ export const inspectVideo = `(() => {
 // Method 2: activate Auto-translate, then capture YouTube's own translated request.
 export function requestNativeCaptions(language = 'en', videoId = '') {
  return `(async () => {
+ ${interceptCaptions}
  ${readPlayerResponse}
  ${readTranslationLanguages}
  const language = ${JSON.stringify(language)};
@@ -136,11 +191,22 @@ export function fetchCapturedCaptions(capturedUrl: string, videoId: string, lang
  const currentId = new URL(location.href).searchParams.get('v') || location.pathname.split('/shorts/')[1]?.split('/')[0];
  if (currentId !== expectedId || url.searchParams.get('v') !== expectedId) throw new Error('Video đã thay đổi trong khi lấy phụ đề.');
  if (url.protocol !== 'https:' || !(url.hostname === 'youtube.com' || url.hostname.endsWith('.youtube.com')) || url.pathname !== '/api/timedtext') throw new Error('URL phụ đề không hợp lệ.');
- // Replay the exact URL requested by YouTube, in the same cookie/origin context.
- const res = await fetch(url.href, { credentials: 'include', signal: AbortSignal.timeout(20000) });
- if (res.status === 429) return { captionRateLimited: true, retryAfter: res.headers.get('retry-after') };
- if (!res.ok) throw new Error('Request phụ đề bắt được trả HTTP ' + res.status + '.');
- const raw = await res.text();
+ // Check in-page intercepted captions first to avoid redundant network request (429 prevention)
+ let raw = window.__taiCapturedCaptions?.[url.href] || window.__taiCapturedCaptions?.[expectedId + '/' + (translated || actual)];
+ if (!raw && window.__taiCapturedCaptions) {
+   for (const [k, v] of Object.entries(window.__taiCapturedCaptions)) {
+     if (typeof v === 'string' && k.includes(expectedId) && (k.includes(language) || (translated && k.includes(translated)))) {
+       raw = v;
+       break;
+     }
+   }
+ }
+ if (!raw) {
+   const res = await fetch(url.href, { credentials: 'include', signal: AbortSignal.timeout(20000) });
+   if (res.status === 429) return { captionRateLimited: true, retryAfter: res.headers.get('retry-after') };
+   if (!res.ok) throw new Error('Request phụ đề bắt được trả HTTP ' + res.status + '.');
+   raw = await res.text();
+ }
  if (!raw.trim()) throw new Error('Đã bắt được request timedtext nhưng YouTube vẫn trả body rỗng (cách 2).');
  if (raw.trim().startsWith('{')) {
    const data = JSON.parse(raw);

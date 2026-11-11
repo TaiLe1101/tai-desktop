@@ -1,4 +1,4 @@
-﻿import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { join } from 'node:path';
 import { SettingsStore } from './settings';
 import { VoiceoverService } from './voiceover';
@@ -46,7 +46,7 @@ else {
     handle('tai:playback', (action, time) => youtube.playback(action, time));
     handle('tai:session', () => youtube.state);
     handle('tai:start-translation', id => youtube.startTranslation(id));
-    handle('tai:load-subtitles', (id, language) => youtube.loadSubtitles(id, language));
+    handle('tai:load-subtitles', (id, language, forceRefresh) => youtube.loadSubtitles(id, language, forceRefresh === true));
     handle('tai:retry', () => youtube.retry());
     handle('tai:audio', (id, chunk, language) => service.readAudio(id, chunk, language));
     handle('tai:settings', () => settings.publicValue());

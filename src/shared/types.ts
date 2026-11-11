@@ -25,7 +25,7 @@ export interface DesktopApi {
   playback(action: 'pause' | 'play' | 'seek', time?: number): Promise<void>;
   session(): Promise<VideoSession>;
   startTranslation(videoId: string): Promise<void>;
-  loadSubtitles(videoId: string, sourceLanguage?: SourceLanguage): Promise<void>;
+  loadSubtitles(videoId: string, sourceLanguage?: SourceLanguage, forceRefresh?: boolean): Promise<void>;
   retry(): Promise<void>;
   audio(videoId: string, chunk: number, sourceLanguage?: SourceLanguage): Promise<Uint8Array>;
   settings(): Promise<Settings & { hasApiKey: boolean }>;
@@ -43,5 +43,5 @@ export interface VideoSession {
   navigationError?: string;
   videoId: string; title: string; phase: 'IDLE' | 'EXTRACTING' | 'CAPTIONS_READY' | 'BUFFERING' | 'PLAYING' | 'COMPLETE' | 'ERROR' | 'NO_SUBTITLES';
   error: string; chunks: VoiceChunk[]; ready: number; total: number; initialRequired: number;
-  time: number; paused: boolean; rate: number; muted: boolean; volume: number; cached: boolean;
+  time: number; paused: boolean; rate: number; muted: boolean; volume: number; cached: boolean; subtitlesCached?: boolean;
 }

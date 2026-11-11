@@ -1,10 +1,10 @@
-﻿import { BrowserWindow, WebContentsView } from 'electron';
+import { BrowserWindow, WebContentsView } from 'electron';
 import { VoiceoverService, normalizeTimeline } from './voiceover';
 import { inspectVideo, requestNativeCaptions, stopNativeCaptions, fetchCapturedCaptions } from './youtube-scripts';
 import { isCaptionLanguage, type SourceLanguage, type VideoSession, type SubtitleSegment } from '../shared/types';
 import { packProgress } from '../shared/progress';
 
-export const emptySession = (): VideoSession => ({ videoId: '', title: '', phase: 'IDLE', error: '', chunks: [], ready: 0, total: 0, initialRequired: 0, time: 0, paused: true, rate: 1, muted: false, volume: 1, cached: false });
+export const emptySession = (): VideoSession => ({ videoId: '', title: '', phase: 'IDLE', error: '', chunks: [], ready: 0, total: 0, initialRequired: 0, time: 0, paused: true, rate: 1, muted: false, volume: 1, cached: false, subtitlesCached: false });
 export function youtubeUrl(value: string) {
   const url = new URL(value);
   if (url.protocol !== 'https:' || !['www.youtube.com', 'youtube.com', 'm.youtube.com'].includes(url.hostname) || url.username || url.password) throw new Error('Chỉ hỗ trợ URL HTTPS YouTube.');
@@ -204,28 +204,51 @@ export class YoutubeSession {
     await this.view.webContents.executeJavaScript(`(async () => { const v = document.querySelector('video'); if(v) { ${command}; } })()`, true).catch(() => {});
   }
   async retry() { await this.startTranslation(this.state.videoId); }
-  async loadSubtitles(id: string, language?: SourceLanguage) {
+  async loadSubtitles(id: string, language?: SourceLanguage, forceRefresh: boolean = false) {
     if (this.loadingCaptions) return;
     this.loadingCaptions = true;
-    try { await this.loadSubtitlesOnce(id, language); }
+    try { await this.loadSubtitlesOnce(id, language, forceRefresh); }
     finally { this.loadingCaptions = false; }
   }
-  private async loadSubtitlesOnce(id: string, language?: SourceLanguage) {
+  private async loadSubtitlesOnce(id: string, language?: SourceLanguage, forceRefresh: boolean = false) {
     language = language || this.state.detectedSourceLanguage;
     if (!isCaptionLanguage(language)) throw new Error('Chưa nhận diện được ngôn ngữ video. Hãy chọn ngôn ngữ phụ đề trước.');
     if (!/^[\w-]{11}$/.test(id)) throw new Error('Chọn một video trước khi lấy phụ đề.');
     const allowed = ['IDLE', 'CAPTIONS_READY', 'ERROR', 'NO_SUBTITLES'];
     if (!allowed.includes(this.state.phase)) return;
     const key = `${id}/${language}`;
-    const cached = this.captionData.get(key);
-    if ((!cached || Date.now() - cached.at >= 600000) && Date.now() < this.captionCooldownUntil) {
-      throw new Error(`YouTube đang giới hạn lấy phụ đề. Chờ ${Math.ceil((this.captionCooldownUntil - Date.now()) / 1000)} giây trước khi thử lại.`);
-    }
+
     const generation = this.generation;
     const info = await this.view.webContents.executeJavaScript(inspectVideo);
     if (generation !== this.generation || info.id !== id || !info.valid) throw new Error('Video đã thay đổi hoặc chưa tải xong.');
     if (!allowed.includes(this.state.phase)) return;
     if (info.ad) throw new Error('Chờ quảng cáo kết thúc rồi lấy phụ đề.');
+
+    if (!forceRefresh) {
+      const memCached = this.captionData.get(key);
+      const cached = memCached?.subtitles || await this.service.getCachedSubtitles(id, language);
+      if (cached && cached.length) {
+        this.reset();
+        this.state.sourceLanguage = language;
+        this.state.videoId = id;
+        this.state.title = info.title;
+        this.loadedSubtitles = cached;
+        this.captionData.set(key, { subtitles: cached, at: Date.now() });
+        this.state.chunks = this.loadedSubtitles.map((s, id) => ({ ...s, id, ready: false }));
+        this.state.total = this.loadedSubtitles.length;
+        this.state.phase = 'CAPTIONS_READY';
+        this.state.subtitlesCached = true;
+        return;
+      }
+    } else {
+      this.captionData.delete(key);
+      await this.service.clearSubtitles(id, language);
+    }
+
+    if (Date.now() < this.captionCooldownUntil) {
+      throw new Error(`YouTube đang giới hạn lấy phụ đề. Chờ ${Math.ceil((this.captionCooldownUntil - Date.now()) / 1000)} giây trước khi thử lại.`);
+    }
+
     this.reset();
     this.state.sourceLanguage = language;
     this.state.videoId = id; this.state.title = info.title;
@@ -233,18 +256,19 @@ export class YoutubeSession {
     this.state.phase = 'EXTRACTING';
     const token = this.generation;
     try {
-      // Repeated clicks reuse caption text, not just the signed URL.
-      const input = cached && Date.now() - cached.at < 600000 ? cached.subtitles : await this.subtitlesFromNetwork(id, language);
+      const input = await this.subtitlesFromNetwork(id, language);
       if (token !== this.generation) return;
       this.loadedSubtitles = normalizeTimeline(input);
       if (this.loadedSubtitles.length) {
         this.captionData.delete(key);
         this.captionData.set(key, { subtitles: this.loadedSubtitles, at: Date.now() });
-        if (this.captionData.size > 4) this.captionData.delete(this.captionData.keys().next().value!);
+        if (this.captionData.size > 8) this.captionData.delete(this.captionData.keys().next().value!);
+        await this.service.saveSubtitles(id, language, this.loadedSubtitles);
       }
       this.state.chunks = this.loadedSubtitles.map((s, id) => ({ ...s, id, ready: false }));
       this.state.total = this.loadedSubtitles.length;
       this.state.phase = this.loadedSubtitles.length ? 'CAPTIONS_READY' : 'NO_SUBTITLES';
+      this.state.subtitlesCached = false;
     } catch (e) {
       if (token === this.generation) { this.state.phase = 'ERROR'; this.state.error = e instanceof Error ? e.message : String(e); }
     }

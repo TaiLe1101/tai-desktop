@@ -10,6 +10,7 @@ import Translate from '@mui/icons-material/Translate';
 import FolderOpen from '@mui/icons-material/FolderOpen';
 import ChevronLeft from '@mui/icons-material/ChevronLeft';
 import ChevronRight from '@mui/icons-material/ChevronRight';
+import Refresh from '@mui/icons-material/Refresh';
 import { sourceLanguages, type SourceLanguage, type DesktopApi, type SettingsInput, type VideoSession } from '../shared/types';
 import { VoicePlayer } from './player';
 import './style.css';
@@ -129,7 +130,14 @@ function App() {
                   } } }}
                   renderInput={params => <TextField {...params} label="Dịch tự động YouTube sang" placeholder={session.detectedSourceLanguage ? 'Tìm ngôn ngữ…' : 'Chọn ngôn ngữ khi chưa nhận diện được…'}/>}
                 />
-                <Button fullWidth variant="outlined" startIcon={<ClosedCaption/>} disabled={!session.videoId || !sourceLanguage || session.phase === 'EXTRACTING'} onClick={() => { languageChoice.current = { videoId: session.videoId, manual: true }; void run(() => window.tai.loadSubtitles(session.videoId, sourceLanguage)); }}>{session.phase === 'EXTRACTING' ? 'Đang lấy phụ đề…' : 'Lấy phụ đề'}</Button>
+                <Stack direction="row" sx={{ gap: 1 }}>
+                  <Button fullWidth variant="outlined" startIcon={<ClosedCaption/>} disabled={!session.videoId || !sourceLanguage || session.phase === 'EXTRACTING'} onClick={() => { languageChoice.current = { videoId: session.videoId, manual: true }; void run(() => window.tai.loadSubtitles(session.videoId, sourceLanguage)); }}>{session.phase === 'EXTRACTING' ? 'Đang lấy phụ đề…' : 'Lấy phụ đề'}</Button>
+                  {session.phase === 'CAPTIONS_READY' && (
+                    <IconButton title="Lấy lại phụ đề mới từ YouTube (bỏ cache cũ)" aria-label="Lấy lại phụ đề mới từ YouTube" color="primary" onClick={() => { languageChoice.current = { videoId: session.videoId, manual: true }; void run(() => window.tai.loadSubtitles(session.videoId, sourceLanguage, true)); }}>
+                      <Refresh fontSize="small"/>
+                    </IconButton>
+                  )}
+                </Stack>
                 <Button fullWidth variant="contained" startIcon={<Translate/>} disabled={!session.chunks.length || sourceLanguage !== (session.sourceLanguage || 'en') || !['CAPTIONS_READY', 'ERROR'].includes(session.phase)} onClick={() => void run(() => window.tai.startTranslation(session.videoId))}>Dịch</Button>
               </Stack>}
               {session?.phase === 'EXTRACTING' && <LinearProgress sx={{ mb: 2 }}/>}

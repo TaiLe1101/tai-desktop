@@ -1,4 +1,4 @@
-﻿import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer } from 'electron';
 import type { DesktopApi } from '../shared/types';
 const api: DesktopApi = {
   voice: enabled => ipcRenderer.invoke('tai:voice', enabled),
@@ -7,7 +7,7 @@ const api: DesktopApi = {
   playback: (action, time) => ipcRenderer.invoke('tai:playback', action, time),
   session: () => ipcRenderer.invoke('tai:session'),
   startTranslation: id => ipcRenderer.invoke('tai:start-translation', id),
-  loadSubtitles: (id, language) => ipcRenderer.invoke('tai:load-subtitles', id, language),
+  loadSubtitles: (id, language, forceRefresh) => ipcRenderer.invoke('tai:load-subtitles', id, language, forceRefresh),
   retry: () => ipcRenderer.invoke('tai:retry'),
   audio: (id, chunk, language) => ipcRenderer.invoke('tai:audio', id, chunk, language),
   settings: () => ipcRenderer.invoke('tai:settings'),

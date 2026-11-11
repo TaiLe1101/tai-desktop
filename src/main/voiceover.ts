@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, stat, unlink, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { sourceLanguages, type SourceLanguage, type SubtitleSegment, type VoiceChunk } from '../shared/types';
+import { isCaptionLanguage, type SourceLanguage, type SubtitleSegment, type VoiceChunk } from '../shared/types';
 import { ensureAudioDirectory } from './storage';
 import { ApiError, videoId } from './errors';
 export { ApiError, videoId } from './errors';
@@ -42,9 +42,9 @@ export class VoiceoverService {
   }
   private context(id: string, sourceLanguage: SourceLanguage = 'en') {
     videoId(id);
-    if (!sourceLanguages.some(s => s.value === sourceLanguage)) throw new Error('Ngôn ngữ nguồn không hợp lệ.');
+    if (!isCaptionLanguage(sourceLanguage)) throw new Error('Ngôn ngữ phụ đề không hợp lệ.');
     const settings = this.settings();
-    const profile = createHash('sha256').update(JSON.stringify([settings.targetLang, sourceLanguage, 'desktop-caption-source-v3'])).digest('hex').slice(0, 16);
+    const profile = createHash('sha256').update(JSON.stringify([settings.targetLang, sourceLanguage, 'desktop-caption-auto-translate-v4'])).digest('hex').slice(0, 16);
     return { id, sourceLanguage, settings, profile, key: `${profile}/${id}`, dir: join(this.root, profile, id) };
   }
   private captionsFile(id: string, sourceLanguage: SourceLanguage) {
