@@ -20,7 +20,7 @@ export class AudioService {
     const settings = this.settings();
     if (!settings.workerUrl || !settings.apiKey) throw new ApiError(503, 'Nhập URL worker và Worker access key trong app trước.');
     try {
-      const response = await fetch(`${settings.workerUrl}/health`, { headers: { Authorization: `Bearer ${settings.apiKey}` }, signal: AbortSignal.timeout(10000), redirect: 'error' });
+      const response = await fetch(`${settings.workerUrl}/health`, { headers: { 'X-API-Key': settings.apiKey }, signal: AbortSignal.timeout(10000), redirect: 'error' });
       if (!response.ok) throw new Error(`Worker HTTP ${response.status}; kiểm tra URL và Worker access key.`);
       const result = await response.json();
       if (result.protocol !== 'tai-audio-v1' || !result.asr_ready) throw new Error('Worker chưa hỗ trợ ASR hoặc chưa tải model xong. Chạy notebook TAI mới.');
@@ -75,7 +75,7 @@ export class AudioService {
     try {
       const response = await fetch(`${ctx.settings.workerUrl}/process-audio`, {
         method: 'POST', redirect: 'error', signal: this.controller.signal,
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ctx.settings.apiKey}` },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': ctx.settings.apiKey },
         body: JSON.stringify({ audio_base64: encoded, target_lang: ctx.settings.targetLang })
       });
       if (!response.ok) {

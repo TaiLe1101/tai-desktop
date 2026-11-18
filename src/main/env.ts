@@ -8,7 +8,10 @@ export interface EnvConfig {
   updateUrl: string;
 }
 
-function parseEnv(content: string) {
+type RawEnv = Record<string, string>;
+
+function parseEnv(content: string): RawEnv {
+  const parsed: RawEnv = {};
   const lines = content.split(/\r?\n/);
   for (const raw of lines) {
     const line = raw.trim();
@@ -20,42 +23,49 @@ function parseEnv(content: string) {
     if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
       val = val.slice(1, -1);
     }
-    process.env[key] = val;
+    parsed[key] = val;
   }
+  return parsed;
 }
 
 export function loadEnv(): EnvConfig {
-  const candidates: string[] = [
-    join(process.cwd(), '.env'),
-    join(__dirname, '../../.env'),
-    join(__dirname, '../.env')
-  ];
+  const isPackaged = Boolean(app?.isPackaged);
+  let candidates: string[];
 
-  try {
-    if (app) {
-      if (app.isPackaged) {
-        // Bundled defaults load before external files so local overrides still apply.
-        candidates.unshift(
-          join(process.resourcesPath, '.env'),
-          join(dirname(process.execPath), '.env')
-        );
-      }
-      candidates.push(join(app.getPath('userData'), '.env'));
-    }
-  } catch {}
+  if (isPackaged) {
+    // The bundled production file is the default. Files beside the executable
+    // and in userData are optional deployment-specific overrides.
+    candidates = [
+      join(process.resourcesPath, '.env'),
+      join(dirname(process.execPath), '.env'),
+      join(app.getPath('userData'), '.env')
+    ];
+  } else {
+    // Development overrides production-like defaults without editing them.
+    const roots = [process.cwd(), join(__dirname, '../..'), join(__dirname, '..')];
+    candidates = roots.flatMap(root => [
+      join(root, '.env'),
+      join(root, '.env.development'),
+      join(root, '.env.local'),
+      join(root, '.env.development.local')
+    ]);
+  }
 
-  for (const file of candidates) {
+  let fileEnv: RawEnv = {};
+  for (const file of [...new Set(candidates)]) {
     if (existsSync(file)) {
       try {
-        parseEnv(readFileSync(file, 'utf8'));
+        fileEnv = { ...fileEnv, ...parseEnv(readFileSync(file, 'utf8')) };
       } catch {}
     }
   }
 
+  // Explicit OS/CI variables always have the highest priority.
+  const env = { ...fileEnv, ...process.env };
   return {
-    workerUrl: (process.env.WORKER_URL || '').trim().replace(/\/+$/, ''),
-    workerApiKey: (process.env.WORKER_API_KEY || '').trim(),
-    updateUrl: (process.env.UPDATE_URL || '').trim().replace(/\/+$/, '')
+    workerUrl: (env.WORKER_URL || '').trim().replace(/\/+$/, ''),
+    workerApiKey: (env.WORKER_API_KEY || '').trim(),
+    updateUrl: (env.UPDATE_URL || '').trim().replace(/\/+$/, '')
   };
 }
 

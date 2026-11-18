@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { setDefaultResultOrder } from 'node:dns';
 import { join } from 'node:path';
 import { SettingsStore } from './settings';
 import { VoiceoverService } from './voiceover';
@@ -6,6 +7,11 @@ import { ensureAudioDirectory } from './storage';
 import { YoutubeSession } from './youtube';
 import { AppUpdater } from './updater';
 import type { SettingsInput } from '../shared/types';
+
+// localtest.me resolves to both 127.0.0.1 and ::1. Local Nginx is commonly
+// bound only to IPv4, so an IPv6-first lookup makes worker fetches fail before
+// they ever reach Nginx. Keep Node/Electron main-process requests deterministic.
+setDefaultResultOrder('ipv4first');
 
 app.setName('TAI Desktop');
 let window: BrowserWindow;

@@ -1,12 +1,53 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, stat, unlink, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { net } from 'electron';
 import { isCaptionLanguage, type SourceLanguage, type SubtitleSegment, type VoiceChunk } from '../shared/types';
 import { ensureAudioDirectory } from './storage';
 import { ApiError, videoId } from './errors';
 export { ApiError, videoId } from './errors';
 
 export type WorkerSettings = { workerUrl: string; targetLang: string; apiKey: string };
+const TTS_REQUEST_TIMEOUT_MS = 90_000;
+
+function workerHost(workerUrl: string): string {
+  try { return new URL(workerUrl).host; }
+  catch { return 'không xác định'; }
+}
+
+function workerConnectionError(error: unknown, workerUrl: string, operation: string): Error {
+  if (error instanceof Error && error.name === 'AbortError') {
+    return new Error(`${operation}: AI worker (${workerHost(workerUrl)}) phản hồi quá thời gian chờ.`);
+  }
+  const cause = error instanceof Error
+    ? (error as Error & { cause?: { code?: string } }).cause
+    : undefined;
+  const code = cause?.code;
+  if (code === 'ENOTFOUND') return new Error(`${operation}: không tìm thấy địa chỉ AI worker (${workerHost(workerUrl)}). Kiểm tra WORKER_URL hoặc kết nối mạng.`);
+  if (code === 'ECONNREFUSED') return new Error(`${operation}: AI worker (${workerHost(workerUrl)}) chưa chạy hoặc đang từ chối kết nối.`);
+  if (code === 'ECONNRESET') return new Error(`${operation}: kết nối tới AI worker (${workerHost(workerUrl)}) bị ngắt giữa chừng.`);
+  if (code?.startsWith('CERT_') || code?.includes('TLS')) return new Error(`${operation}: chứng chỉ HTTPS của AI worker (${workerHost(workerUrl)}) không hợp lệ.`);
+  if (error instanceof TypeError && error.message === 'fetch failed') {
+    const suffix = code ? ` [${code}]` : '';
+    return new Error(`${operation}: không thể kết nối tới AI worker (${workerHost(workerUrl)})${suffix}. Kiểm tra worker, proxy và kết nối mạng.`);
+  }
+  return error instanceof Error
+    ? new Error(`${operation}: ${error.message}`)
+    : new Error(`${operation}: không thể kết nối tới AI worker.`);
+}
+
+function validateWorkerSettings(settings: WorkerSettings): void {
+  if (!settings.workerUrl) throw new ApiError(503, 'Chưa cấu hình URL AI worker.');
+  if (!settings.apiKey) throw new ApiError(503, 'Chưa cấu hình API key của AI worker.');
+  let url: URL;
+  try { url = new URL(settings.workerUrl); }
+  catch { throw new ApiError(503, 'WORKER_URL không phải URL hợp lệ.'); }
+  const localHttp = url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !localHttp)) {
+    throw new ApiError(503, 'AI worker cần dùng HTTPS, hoặc HTTP trên localhost.');
+  }
+}
+
 export function normalizeTimeline(input: unknown): SubtitleSegment[] {
   if (!Array.isArray(input) || input.length > 20000) throw new ApiError(400, 'Danh sách phụ đề không hợp lệ.');
   const valid: SubtitleSegment[] = input.map((s) => {
@@ -29,6 +70,31 @@ export class VoiceoverService {
   constructor(private storageRoot: string, private settings: () => WorkerSettings) {}
   get root() { return this.storageRoot; }
   get activeJobs() { return this.jobs.size; }
+  async health(): Promise<void> {
+    const settings = this.settings();
+    validateWorkerSettings(settings);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await net.fetch(`${settings.workerUrl}/health`, {
+        headers: { 'X-API-Key': settings.apiKey },
+        redirect: 'error',
+        signal: controller.signal
+      });
+      if (response.status === 401 || response.status === 403) {
+        throw new ApiError(401, 'API key của AI worker không đúng.');
+      }
+      if (!response.ok) throw new ApiError(503, `AI worker health trả HTTP ${response.status}.`);
+      const body = await response.json() as { status?: unknown; protocol?: unknown };
+      if (body.status !== 'ok' || body.protocol !== 'tai-tts-v1') {
+        throw new ApiError(503, 'URL hiện tại không phải TAI TTS Worker tương thích.');
+      }
+    } catch (error) {
+      throw workerConnectionError(error, settings.workerUrl, 'Kiểm tra kết nối');
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   async changeAudioDirectory(directory: string, persist: () => Promise<void>) {
     if (this.stopping || this.activeJobs || this.changingDirectory) throw new Error('Hãy chờ các video xử lý xong trước khi đổi thư mục audio.');
     this.changingDirectory = true;
@@ -134,14 +200,16 @@ export class VoiceoverService {
     for (let i = 0; i < subs.length && !this.stopping; i++) {
       const file = join(ctx.dir, `chunk_${i}.mp3`);
       if (await exists(file)) continue;
-      if (!ctx.settings.workerUrl) throw new ApiError(503, 'Mở TAI Desktop và cấu hình URL AI worker trước.');
+      validateWorkerSettings(ctx.settings);
       const controller = new AbortController();
       this.controllers.add(controller);
-      const timer = setTimeout(() => controller.abort(), 35000);
+      // The worker may spend 30s on Gemini before translation and Edge TTS
+      // fallbacks run, so the client timeout must cover the whole pipeline.
+      const timer = setTimeout(() => controller.abort(), TTS_REQUEST_TIMEOUT_MS);
       try {
-        const response = await fetch(`${ctx.settings.workerUrl}/process-tts`, {
+        const response = await net.fetch(`${ctx.settings.workerUrl}/process-tts`, {
           method: 'POST', redirect: 'error', signal: controller.signal,
-          headers: { 'Content-Type': 'application/json', ...(ctx.settings.apiKey ? { Authorization: `Bearer ${ctx.settings.apiKey}` } : {}) },
+          headers: { 'Content-Type': 'application/json', ...(ctx.settings.apiKey ? { 'X-API-Key': ctx.settings.apiKey } : {}) },
           body: JSON.stringify({ text: subs[i].text, target_lang: ctx.settings.targetLang })
         });
         if (!response.ok) throw new Error(`AI worker trả HTTP ${response.status} ở đoạn ${i}.`);
@@ -157,6 +225,8 @@ export class VoiceoverService {
         if (!size) throw new Error('AI worker trả âm thanh rỗng.');
         await writeFile(`${file}.tmp`, Buffer.concat(parts));
         await rename(`${file}.tmp`, file);
+      } catch (error) {
+        throw workerConnectionError(error, ctx.settings.workerUrl, `Tạo giọng đọc đoạn ${i + 1}`);
       } finally { clearTimeout(timer); this.controllers.delete(controller); }
     }
   }

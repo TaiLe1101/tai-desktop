@@ -17,6 +17,21 @@ WORKER_API_KEY=your_worker_access_key_here
 
 Khi đã khai báo trong `.env`, ứng dụng sẽ tự động sử dụng các cấu hình này mà không cần nhập lại trên giao diện. Màn hình Cài đặt chỉ giữ các thiết lập cơ bản (Khởi động cùng Windows, Thư mục Cache trên máy, và Nút Kiểm tra cập nhật).
 
+### Tách môi trường development và production
+
+`.env` là cấu hình production và được đưa vào bản cài đặt khi chạy
+`npm run dist:win`. Để dùng worker local khi phát triển, tạo file một lần:
+
+```powershell
+Copy-Item .env.development.example .env.development
+```
+
+Sau đó sửa `WORKER_API_KEY` trong `.env.development` cho trùng với
+`tai-worker/.env`. Khi chạy `npm run start:dev`, các giá trị trong
+`.env.development` tự động ghi đè `.env`. File này bị Git bỏ qua và không được
+đưa vào bản build. Biến môi trường do terminal hoặc CI truyền vào có độ ưu tiên
+cao nhất.
+
 ## Chạy
 
 Yêu cầu Node.js 22.12+ hoặc 24:

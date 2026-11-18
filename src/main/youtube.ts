@@ -295,6 +295,12 @@ export class YoutubeSession {
     if (!['CAPTIONS_READY', 'ERROR'].includes(this.state.phase)) return;
     const subtitles = this.loadedSubtitles;
     const language = this.state.sourceLanguage || 'en';
+    // Cached voiceover remains playable offline. Only contact the worker when
+    // at least one audio chunk still needs to be generated.
+    const cached = await this.service.snapshot(id, language);
+    const fullyCached = cached.chunks.length > 0 && cached.chunks.every(chunk => chunk.ready);
+    if (!fullyCached) await this.service.health();
+    if (generation !== this.generation || this.state.videoId !== id) return;
     this.reset();
     this.state.sourceLanguage = language;
     this.loadedSubtitles = subtitles;
