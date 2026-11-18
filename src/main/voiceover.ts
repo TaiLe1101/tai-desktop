@@ -9,6 +9,35 @@ export { ApiError, videoId } from './errors';
 
 export type WorkerSettings = { workerUrl: string; targetLang: string; apiKey: string };
 const TTS_REQUEST_TIMEOUT_MS = 90_000;
+const TTS_MAX_ATTEMPTS = 3;
+const RETRYABLE_HTTP_STATUSES = new Set([429, 502, 503, 504]);
+
+class RetryableWorkerError extends Error {
+  constructor(message: string, readonly retryAfterMs?: number) {
+    super(message);
+    this.name = 'RetryableWorkerError';
+  }
+}
+
+function retryAfterMs(response: Response): number | undefined {
+  const value = response.headers.get('retry-after');
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 30_000);
+  const date = Date.parse(value);
+  if (Number.isNaN(date)) return undefined;
+  return Math.min(Math.max(date - Date.now(), 0), 30_000);
+}
+
+function isTransientWorkerError(error: unknown): boolean {
+  if (error instanceof RetryableWorkerError) return true;
+  if (!(error instanceof Error)) return true;
+  if (error.name === 'AbortError' || error instanceof TypeError) return true;
+  const cause = (error as Error & { cause?: { code?: string } }).cause;
+  const code = cause?.code || '';
+  return ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN'].includes(code)
+    || error.message.includes('net::ERR_');
+}
 
 function workerHost(workerUrl: string): string {
   try { return new URL(workerUrl).host; }
@@ -73,27 +102,47 @@ export class VoiceoverService {
   async health(): Promise<void> {
     const settings = this.settings();
     validateWorkerSettings(settings);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10000);
-    try {
-      const response = await net.fetch(`${settings.workerUrl}/health`, {
-        headers: { 'X-API-Key': settings.apiKey },
-        redirect: 'error',
-        signal: controller.signal
-      });
-      if (response.status === 401 || response.status === 403) {
-        throw new ApiError(401, 'API key của AI worker không đúng.');
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= TTS_MAX_ATTEMPTS; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      let delay: number | undefined;
+      try {
+        const response = await net.fetch(`${settings.workerUrl}/health`, {
+          headers: { 'X-API-Key': settings.apiKey },
+          redirect: 'error',
+          signal: controller.signal
+        });
+        if (response.status === 401 || response.status === 403) {
+          throw new ApiError(401, 'API key của AI worker không đúng.');
+        }
+        if (!response.ok) {
+          const message = `AI worker health trả HTTP ${response.status}.`;
+          if (RETRYABLE_HTTP_STATUSES.has(response.status)) {
+            throw new RetryableWorkerError(message, retryAfterMs(response));
+          }
+          throw new ApiError(503, message);
+        }
+        const body = await response.json() as { status?: unknown; protocol?: unknown };
+        if (body.status !== 'ok' || body.protocol !== 'tai-tts-v1') {
+          throw new ApiError(503, 'URL hiện tại không phải TAI TTS Worker tương thích.');
+        }
+        return;
+      } catch (error) {
+        lastError = error;
+        if (!isTransientWorkerError(error) || attempt === TTS_MAX_ATTEMPTS) {
+          throw workerConnectionError(error, settings.workerUrl, `Kiểm tra kết nối thất bại sau ${attempt} lần thử`);
+        }
+        delay = error instanceof RetryableWorkerError && error.retryAfterMs !== undefined
+          ? error.retryAfterMs
+          : 1000 * (2 ** (attempt - 1));
+      } finally {
+        clearTimeout(timer);
       }
-      if (!response.ok) throw new ApiError(503, `AI worker health trả HTTP ${response.status}.`);
-      const body = await response.json() as { status?: unknown; protocol?: unknown };
-      if (body.status !== 'ok' || body.protocol !== 'tai-tts-v1') {
-        throw new ApiError(503, 'URL hiện tại không phải TAI TTS Worker tương thích.');
-      }
-    } catch (error) {
-      throw workerConnectionError(error, settings.workerUrl, 'Kiểm tra kết nối');
-    } finally {
-      clearTimeout(timer);
+      console.warn(`AI worker health tạm lỗi; thử lại lần ${attempt + 1}/${TTS_MAX_ATTEMPTS} sau ${delay}ms.`);
+      await new Promise(resolve => setTimeout(resolve, delay));
     }
+    throw workerConnectionError(lastError, settings.workerUrl, 'Kiểm tra kết nối');
   }
   async changeAudioDirectory(directory: string, persist: () => Promise<void>) {
     if (this.stopping || this.activeJobs || this.changingDirectory) throw new Error('Hãy chờ các video xử lý xong trước khi đổi thư mục audio.');
@@ -110,7 +159,7 @@ export class VoiceoverService {
     videoId(id);
     if (!isCaptionLanguage(sourceLanguage)) throw new Error('Ngôn ngữ phụ đề không hợp lệ.');
     const settings = this.settings();
-    const profile = createHash('sha256').update(JSON.stringify([settings.targetLang, sourceLanguage, 'desktop-caption-auto-translate-v4'])).digest('hex').slice(0, 16);
+    const profile = createHash('sha256').update(JSON.stringify([settings.targetLang, sourceLanguage, 'desktop-caption-auto-translate-v5'])).digest('hex').slice(0, 16);
     return { id, sourceLanguage, settings, profile, key: `${profile}/${id}`, dir: join(this.root, profile, id) };
   }
   private captionsFile(id: string, sourceLanguage: SourceLanguage) {
@@ -200,19 +249,33 @@ export class VoiceoverService {
     for (let i = 0; i < subs.length && !this.stopping; i++) {
       const file = join(ctx.dir, `chunk_${i}.mp3`);
       if (await exists(file)) continue;
-      validateWorkerSettings(ctx.settings);
+      await this.renderChunk(ctx.settings, subs[i].text, i, file);
+    }
+  }
+  private async renderChunk(settings: WorkerSettings, text: string, index: number, file: string): Promise<void> {
+    validateWorkerSettings(settings);
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= TTS_MAX_ATTEMPTS; attempt++) {
+      if (this.stopping) return;
       const controller = new AbortController();
       this.controllers.add(controller);
       // The worker may spend 30s on Gemini before translation and Edge TTS
       // fallbacks run, so the client timeout must cover the whole pipeline.
       const timer = setTimeout(() => controller.abort(), TTS_REQUEST_TIMEOUT_MS);
       try {
-        const response = await net.fetch(`${ctx.settings.workerUrl}/process-tts`, {
+        const response = await net.fetch(`${settings.workerUrl}/process-tts`, {
           method: 'POST', redirect: 'error', signal: controller.signal,
-          headers: { 'Content-Type': 'application/json', ...(ctx.settings.apiKey ? { 'X-API-Key': ctx.settings.apiKey } : {}) },
-          body: JSON.stringify({ text: subs[i].text, target_lang: ctx.settings.targetLang })
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': settings.apiKey },
+          body: JSON.stringify({ text, target_lang: settings.targetLang })
         });
-        if (!response.ok) throw new Error(`AI worker trả HTTP ${response.status} ở đoạn ${i}.`);
+        if (response.status === 401 || response.status === 403) throw new ApiError(401, 'API key của AI worker không đúng.');
+        if (!response.ok) {
+          const message = `AI worker trả HTTP ${response.status} ở đoạn ${index + 1}.`;
+          if (RETRYABLE_HTTP_STATUSES.has(response.status)) {
+            throw new RetryableWorkerError(message, retryAfterMs(response));
+          }
+          throw new Error(message);
+        }
         if (!/^audio\/(mpeg|mp3)(;|$)/i.test(response.headers.get('content-type') || '')) throw new Error('AI worker phải trả audio/mpeg (MP3).');
         const parts: Uint8Array[] = [];
         let size = 0;
@@ -225,10 +288,24 @@ export class VoiceoverService {
         if (!size) throw new Error('AI worker trả âm thanh rỗng.');
         await writeFile(`${file}.tmp`, Buffer.concat(parts));
         await rename(`${file}.tmp`, file);
+        return;
       } catch (error) {
-        throw workerConnectionError(error, ctx.settings.workerUrl, `Tạo giọng đọc đoạn ${i + 1}`);
+        lastError = error;
+        await unlink(`${file}.tmp`).catch(() => {});
+        if (this.stopping) return;
+        if (!isTransientWorkerError(error) || attempt === TTS_MAX_ATTEMPTS) {
+          const operation = `Tạo giọng đọc đoạn ${index + 1} thất bại sau ${attempt} lần thử`;
+          throw workerConnectionError(error, settings.workerUrl, operation);
+        }
+        const fallbackDelay = 1000 * (2 ** (attempt - 1));
+        const delay = error instanceof RetryableWorkerError && error.retryAfterMs !== undefined
+          ? error.retryAfterMs
+          : fallbackDelay;
+        console.warn(`AI worker tạm lỗi ở đoạn ${index + 1}; thử lại lần ${attempt + 1}/${TTS_MAX_ATTEMPTS} sau ${delay}ms.`);
+        await new Promise(resolve => setTimeout(resolve, delay));
       } finally { clearTimeout(timer); this.controllers.delete(controller); }
     }
+    throw workerConnectionError(lastError, settings.workerUrl, `Tạo giọng đọc đoạn ${index + 1}`);
   }
   async stop() {
     this.stopping = true;
