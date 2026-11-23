@@ -3,9 +3,12 @@ import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 export interface EnvConfig {
+  serverUrl: string;
+  serverApiKey: string;
   workerUrl: string;
   workerApiKey: string;
   updateUrl: string;
+  isExplicitServerUrl: boolean;
 }
 
 type RawEnv = Record<string, string>;
@@ -26,6 +29,17 @@ function parseEnv(content: string): RawEnv {
     parsed[key] = val;
   }
   return parsed;
+}
+
+function deriveOrigin(urlStr: string): string {
+  if (!urlStr) return '';
+  try {
+    const parsed = new URL(urlStr);
+    if (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname))) {
+      return parsed.origin;
+    }
+  } catch {}
+  return '';
 }
 
 export function loadEnv(): EnvConfig {
@@ -62,14 +76,20 @@ export function loadEnv(): EnvConfig {
 
   // Explicit OS/CI variables always have the highest priority.
   const env = { ...fileEnv, ...process.env };
+  const updateUrl = (env.UPDATE_URL || '').trim().replace(/\/+$/, '');
+  const explicitServer = (env.SERVER_URL || '').trim().replace(/\/+$/, '');
+  const serverUrl = explicitServer || deriveOrigin(updateUrl);
+
   return {
+    serverUrl,
+    serverApiKey: (env.SERVER_API_KEY || '').trim(),
     workerUrl: (env.WORKER_URL || '').trim().replace(/\/+$/, ''),
     workerApiKey: (env.WORKER_API_KEY || '').trim(),
-    updateUrl: (env.UPDATE_URL || '').trim().replace(/\/+$/, '')
+    updateUrl,
+    isExplicitServerUrl: Boolean(explicitServer)
   };
 }
 
 export function getEnvConfig(): EnvConfig {
   return loadEnv();
 }
-

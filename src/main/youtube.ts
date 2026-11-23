@@ -1,42 +1,156 @@
 import { BrowserWindow, WebContentsView } from 'electron';
-import { VoiceoverService, normalizeTimeline } from './voiceover';
-import { inspectVideo, requestNativeCaptions, stopNativeCaptions, fetchCapturedCaptions } from './youtube-scripts';
-import { isCaptionLanguage, type SourceLanguage, type VideoSession, type SubtitleSegment } from '../shared/types';
-import { packProgress } from '../shared/progress';
+import { DubbingClient, MAX_SUBTITLE_PAYLOAD_CHARS, SubtitleDownloadFailedError } from './dubbing-client';
+import { VoiceoverService } from './voiceover';
+import {
+  controlVideoScript,
+  downloadTimedtextInPageScript,
+  inspectVideo,
+  pollPlayerMetadataScript,
+  revertCaptionsToggleScript,
+  toggleCaptionsForCaptureScript,
+  updateOverlayScript
+} from './youtube-scripts';
+import {
+  buildSourceTimedtextUrl,
+  findYouTubeLanguage,
+  hasTimedtextPot,
+  isSameSpokenLanguage,
+  isTimedtextUrlUsable,
+  selectSourceTrack
+} from '../shared/languages';
+import {
+  dedupeAndSortSounds,
+  nextMissingSegment,
+  planSegmentLoad
+} from '../shared/subtitles';
+import {
+  isCaptionLanguage,
+  type CaptionTrackInfo,
+  type DubbingCue,
+  type DubbingSegment,
+  type OverlayAnchor,
+  type OverlayStatePayload,
+  type SoundCue,
+  type SourceLanguage,
+  type StartDubbingOptions,
+  type TranslationLanguageInfo,
+  type VideoControlCommand,
+  type VideoSession
+} from '../shared/types';
 
-export const emptySession = (): VideoSession => ({ videoId: '', title: '', phase: 'IDLE', error: '', chunks: [], ready: 0, total: 0, initialRequired: 0, time: 0, paused: true, rate: 1, muted: false, volume: 1, cached: false, subtitlesCached: false });
+// Exact constants from autodub-example spec
+const AUTO_TRANSLATE_429_COOLDOWN_MS = 1_800_000; // 30 minutes
+const PASSIVE_TIMEDTEXT_WAIT_MS = 1_500;
+const ACTIVE_TIMEDTEXT_WAIT_MS = 15_000;
+const SEGMENT_PLAN_CADENCE_MS = 1_000;
+const PLAYER_POLL_MS = 100;
+
+interface ObservedTimedtext {
+  url: string;
+  videoId: string;
+  source: 'page' | 'background' | 'potless';
+  hasPot: boolean;
+  at: number;
+}
+
+export const emptySession = (): VideoSession => ({
+  videoId: '',
+  title: '',
+  phase: 'IDLE',
+  error: '',
+  chunks: [],
+  ready: 0,
+  total: 0,
+  initialRequired: 0,
+  time: 0,
+  paused: true,
+  rate: 1,
+  muted: false,
+  volume: 1,
+  cached: false,
+  subtitlesCached: false,
+  duration: 0,
+  ended: false,
+  buffering: false,
+  adShowing: false,
+  seekVersion: 0,
+  totalSegments: 0,
+  loadedSegments: 0,
+  cues: [],
+  sounds: [],
+  tracks: [],
+  dubbingActive: false
+});
+
 export function youtubeUrl(value: string) {
   const url = new URL(value);
-  if (url.protocol !== 'https:' || !['www.youtube.com', 'youtube.com', 'm.youtube.com'].includes(url.hostname) || url.username || url.password) throw new Error('Chỉ hỗ trợ URL HTTPS YouTube.');
+  if (url.protocol !== 'https:' || !['www.youtube.com', 'youtube.com', 'm.youtube.com'].includes(url.hostname) || url.username || url.password) {
+    throw new Error('Chỉ hỗ trợ URL HTTPS YouTube.');
+  }
   return url.href;
 }
+
 function isYoutubePage(value: string) {
   try { youtubeUrl(value); return true; } catch { return false; }
 }
+
 function canNavigate(value: string) {
   if (isYoutubePage(value)) return true;
   try {
     const url = new URL(value);
     if (url.protocol !== 'https:' || url.username || url.password) return false;
     if (['accounts.google.com', 'accounts.youtube.com', 'consent.google.com', 'consent.youtube.com', 'myaccount.google.com'].includes(url.hostname)) return true;
-    // Sign-in may set cookies on Google before returning to YouTube.
     return ['google.com', 'www.google.com', 'www.google.com.vn', 'www.google.co.th'].includes(url.hostname) && url.pathname.startsWith('/accounts/');
   } catch { return false; }
 }
+
+function pickBestTimedtext(candidates: ObservedTimedtext[], videoId: string): ObservedTimedtext | null {
+  const now = Date.now();
+  const usable = candidates.filter(c => c.videoId === videoId && isTimedtextUrlUsable(c.url, videoId, now));
+  const priority: Array<ObservedTimedtext['source']> = ['page', 'background', 'potless'];
+  for (const src of priority) {
+    const matches = usable.filter(c => c.source === src);
+    if (matches.length) {
+      return matches.sort((a, b) => b.at - a.at)[0];
+    }
+  }
+  return null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 export class YoutubeSession {
   readonly view: WebContentsView;
   state = emptySession();
+
   private generation = 0;
   private busy = false;
-  private released = false;
-  private buffering = false;
-  private loadedSubtitles: SubtitleSegment[] = [];
-  private loadingCaptions = false;
-  private captionCooldownUntil = 0;
-  private captionRateLimitCount = 0;
-  private captionData = new Map<string, { subtitles: SubtitleSegment[]; at: number }>();
   private htmlFullscreen = false;
   private layoutBounds: { x: number; y: number; width: number; height: number } | null = null;
+  private timer: NodeJS.Timeout;
+
+  // Dual-layer timedtext observation (Layer 2: background webRequest + Layer 1: in-page PerformanceObserver)
+  private bgObservedTimedtext: ObservedTimedtext[] = [];
+  private pageObservedTimedtext: ObservedTimedtext[] = [];
+  private autoTranslatePausedUntil = 0;
+
+  // Progressive streaming state
+  private dubbingActive = false;
+  private transcriptOpen = true;
+  private targetLang = 'vi';
+  private activeSourceUrl = '';
+  private activeSourceText = '';
+  private activeSourceLang = '';
+  private loadedSegments = new Map<number, DubbingSegment>();
+  private totalSegments = 0;
+  private segmentLoadInFlight = false;
+  private segmentAbortController: AbortController | null = null;
+  private lastSegmentPlanAt = 0;
+  private lastSeekVersion = 0;
+  private overlayAnchor: OverlayAnchor | null = null;
+
   private readonly resizeView = () => {
     if (this.view.webContents.isDestroyed()) return;
     if (this.htmlFullscreen) {
@@ -44,23 +158,48 @@ export class YoutubeSession {
       this.view.setBounds({ x: 0, y: 0, width, height });
     } else if (this.layoutBounds) this.bounds(this.layoutBounds);
   };
-  private capturedCaptions = new Map<string, { url: string; at: number }>();
-  private captionWaiter: { videoId: string; language: SourceLanguage; resolve(url: string): void; reject(error: Error): void; timer: NodeJS.Timeout } | null = null;
-  private timer: NodeJS.Timeout;
-  constructor(private window: BrowserWindow, private service: VoiceoverService,
-    view = new WebContentsView({ webPreferences: { partition: 'persist:tai-youtube-v2', nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false, autoplayPolicy: 'no-user-gesture-required' } })) {
+
+  constructor(
+    private window: BrowserWindow,
+    private service: VoiceoverService,
+    private dubbingClient: DubbingClient,
+    private getDefaultTargetLang: () => string = () => 'vi',
+    view = new WebContentsView({
+      webPreferences: {
+        partition: 'persist:tai-youtube-v2',
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        backgroundThrottling: false,
+        autoplayPolicy: 'no-user-gesture-required'
+      }
+    })
+  ) {
     this.view = view;
     window.contentView.addChildView(this.view);
     this.view.setVisible(false);
     const wc = this.view.webContents;
+
     wc.setWindowOpenHandler(({ url }) => {
       if (!canNavigate(url)) { this.navigationBlocked(url); return { action: 'deny' }; }
-      // Keep Chromium's opener/POST flow intact; loadURL would destroy that flow.
-      return { action: 'allow', overrideBrowserWindowOptions: {
-        parent: this.window, width: 560, height: 780, autoHideMenuBar: true,
-        webPreferences: { partition: 'persist:tai-youtube-v2', nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false }
-      } };
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          parent: this.window,
+          width: 560,
+          height: 780,
+          autoHideMenuBar: true,
+          webPreferences: {
+            partition: 'persist:tai-youtube-v2',
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
+            backgroundThrottling: false
+          }
+        }
+      };
     });
+
     wc.on('did-create-window', child => {
       child.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
       child.webContents.on('will-navigate', (event, url) => {
@@ -70,8 +209,14 @@ export class YoutubeSession {
         if (isMainFrame && !canNavigate(url)) { event.preventDefault(); this.navigationBlocked(url); }
       });
     });
-    wc.session.setPermissionRequestHandler((contents, permission, cb) => cb(contents === wc && permission === 'fullscreen' && isYoutubePage(contents.getURL())));
-    wc.session.setPermissionCheckHandler((contents, permission, origin) => contents === wc && permission === 'fullscreen' && isYoutubePage(origin));
+
+    wc.session.setPermissionRequestHandler((contents, permission, cb) =>
+      cb(contents === wc && permission === 'fullscreen' && isYoutubePage(contents.getURL()))
+    );
+    wc.session.setPermissionCheckHandler((contents, permission, origin) =>
+      contents === wc && permission === 'fullscreen' && isYoutubePage(origin)
+    );
+
     wc.on('enter-html-full-screen', () => {
       this.htmlFullscreen = true;
       this.window.setFullScreen(true);
@@ -87,46 +232,58 @@ export class YoutubeSession {
         void wc.executeJavaScript('if (document.fullscreenElement) document.exitFullscreen();').catch(() => {});
       }
     });
+
     this.window.on('resize', this.resizeView);
     wc.session.on('will-download', event => event.preventDefault());
-    wc.session.webRequest.onCompleted({ urls: ['https://*.youtube.com/api/timedtext*', 'https://youtube.com/api/timedtext*'] }, details => {
-      if (details.webContentsId !== wc.id || details.method !== 'GET') return;
-      const url = new URL(details.url);
-      const id = url.searchParams.get('v');
-      if (url.pathname !== '/api/timedtext' || !id || !/^[\w-]{11}$/.test(id)) return;
-      // A default-track request can be rate-limited before the selected track
-      // is requested, so handle 429 before filtering by language.
-      if (details.statusCode === 429) {
-        const header = Object.entries(details.responseHeaders || {}).find(([name]) => name.toLowerCase() === 'retry-after')?.[1]?.[0];
-        this.cancelCaptionWait(this.captionRateLimited(header));
-        return;
+
+    // Layer 2: Background webRequest.onCompleted timedtext sniffer (accepted as 'background' when usable + hasPot)
+    wc.session.webRequest.onCompleted(
+      { urls: ['https://*.youtube.com/api/timedtext*', 'https://youtube.com/api/timedtext*'] },
+      details => {
+        if (details.webContentsId !== wc.id || details.method !== 'GET') return;
+        try {
+          const url = new URL(details.url);
+          const id = url.searchParams.get('v') || '';
+          if (!/^[\w-]{11}$/.test(id)) return;
+          if (details.statusCode === 429 && url.searchParams.get('tlang')) {
+            this.autoTranslatePausedUntil = Date.now() + AUTO_TRANSLATE_429_COOLDOWN_MS;
+            this.state.autoTranslatePausedUntil = this.autoTranslatePausedUntil;
+            return;
+          }
+          if (details.statusCode !== 200) return;
+          if (!isTimedtextUrlUsable(details.url, id)) return;
+          const hasPot = hasTimedtextPot(details.url);
+          this.bgObservedTimedtext.push({
+            url: details.url,
+            videoId: id,
+            source: hasPot ? 'background' : 'potless',
+            hasPot,
+            at: Date.now()
+          });
+          if (this.bgObservedTimedtext.length > 32) {
+            this.bgObservedTimedtext.splice(0, this.bgObservedTimedtext.length - 32);
+          }
+        } catch {}
       }
-      const translated = url.searchParams.get('tlang');
-      const code = translated || (url.searchParams.get('kind') === 'asr' ? url.searchParams.get('lang') : null);
-      if (!isCaptionLanguage(code)) return;
-      const language = this.captionWaiter && this.matchesSource(url, this.captionWaiter.language) ? this.captionWaiter.language : code;
-      if (details.statusCode !== 200) {
-        if (this.captionWaiter?.videoId === id && this.captionWaiter.language === language) this.cancelCaptionWait(new Error(`YouTube timedtext trả HTTP ${details.statusCode} (cách 2).`));
-        return;
-      }
-      this.capturedCaptions.set(`${id}/${language}`, { url: details.url, at: Date.now() });
-      if (this.capturedCaptions.size > 16) this.capturedCaptions.delete(this.capturedCaptions.keys().next().value!);
-      const waiter = this.captionWaiter;
-      if (waiter?.videoId === id && waiter.language === language) { clearTimeout(waiter.timer); this.captionWaiter = null; waiter.resolve(details.url); }
-    });
+    );
+
     wc.on('will-navigate', (event, url) => {
       if (!canNavigate(url)) { event.preventDefault(); this.navigationBlocked(url); }
       else this.state.navigationError = '';
     });
     wc.on('will-redirect', (event, url, _inPlace, isMainFrame) => {
-      // A top-level allowlist must not cancel Google's iframe redirects.
       if (!isMainFrame) return;
       if (!canNavigate(url)) { event.preventDefault(); this.navigationBlocked(url); }
       else this.state.navigationError = '';
     });
-    wc.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) this.reset(); });
+    wc.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => {
+      if (mainFrame && !inPlace) this.reset();
+    });
     wc.on('did-fail-load', (_e, code, message, _url, mainFrame) => {
-      if (mainFrame && code !== -3) { this.state.phase = 'ERROR'; this.state.error = `Không tải được YouTube: ${message}`; }
+      if (mainFrame && code !== -3) {
+        this.state.phase = 'ERROR';
+        this.state.error = `Không tải được YouTube: ${message}`;
+      }
     });
     wc.on('did-finish-load', () => {
       void wc.insertCSS(`
@@ -138,245 +295,612 @@ export class YoutubeSession {
         ::-webkit-scrollbar-corner { background: transparent !important; }
       `).catch(() => {});
     });
-    this.timer = setInterval(() => { void this.tick(); }, 400);
+
+    // 100ms responsive tracking cadence
+    this.timer = setInterval(() => { void this.tick(); }, PLAYER_POLL_MS);
   }
-  reset() { this.generation++; this.cancelCaptionWait(new Error('Video hoặc phiên lấy phụ đề đã thay đổi.')); this.released = false; this.buffering = false; this.loadedSubtitles = []; this.state = { ...emptySession(), captionRetryAt: this.captionCooldownUntil }; }
-  private captionRateLimited(retryAfter?: string | null) {
-    const now = Date.now();
-    if (now >= this.captionCooldownUntil) this.captionRateLimitCount++;
-    const parsed = retryAfter ? (/^\d+$/.test(retryAfter.trim()) ? now + Number(retryAfter) * 1000 : Date.parse(retryAfter)) : NaN;
-    const fallback = now + 60000 * 2 ** Math.min(3, Math.max(0, this.captionRateLimitCount - 1));
-    this.captionCooldownUntil = Math.max(this.captionCooldownUntil, Number.isFinite(parsed) && parsed > now ? parsed : fallback);
-    this.state.captionRetryAt = this.captionCooldownUntil;
-    return new Error(`YouTube /api/timedtext trả HTTP 429. Tạm dừng lấy phụ đề; thử lại sau ${Math.ceil((this.captionCooldownUntil - now) / 1000)} giây. Đây không phải lỗi worker/Gemini.`);
+
+  reset() {
+    const prevVideoId = this.state.videoId;
+    this.generation++;
+    this.segmentAbortController?.abort();
+    this.segmentAbortController = null;
+    this.segmentLoadInFlight = false;
+    this.dubbingActive = false;
+    this.activeSourceUrl = '';
+    this.activeSourceText = '';
+    this.activeSourceLang = '';
+    this.loadedSegments.clear();
+    this.totalSegments = 0;
+    this.lastSegmentPlanAt = 0;
+    this.state = {
+      ...emptySession(),
+      autoTranslatePausedUntil: this.autoTranslatePausedUntil,
+      overlayAnchor: this.overlayAnchor || undefined
+    };
+    if (prevVideoId && !this.view.webContents.isDestroyed()) {
+      void this.view.webContents.executeJavaScript(revertCaptionsToggleScript(prevVideoId), true).catch(() => {});
+      void this.updateOverlay({
+        mode: 'hidden',
+        translatedText: '',
+        sourceText: '',
+        soundText: '',
+        status: 'idle',
+        dubbingActive: false
+      }).catch(() => {});
+    }
   }
+
   private navigationBlocked(value: string) {
     let host = 'địa chỉ không hợp lệ';
-    try { host = new URL(value).hostname; } catch { /* No URL parameters or auth tokens in the UI. */ }
+    try { host = new URL(value).hostname; } catch {}
     this.state.navigationError = `Ứng dụng đã chặn chuyển trang tới ${host}. Nếu đang đăng nhập, hãy báo tên miền này để kiểm tra.`;
   }
-  private cancelCaptionWait(error: Error) {
-    const waiter = this.captionWaiter;
-    this.captionWaiter = null;
-    if (waiter) { clearTimeout(waiter.timer); waiter.reject(error); }
+
+  async navigate(url: string) {
+    await this.view.webContents.loadURL(youtubeUrl(url));
   }
-  private matchesSource(url: URL, language: SourceLanguage) {
-    const translated = url.searchParams.get('tlang');
-    const actual = (translated || (url.searchParams.get('kind') === 'asr' ? url.searchParams.get('lang') : '') || '').toLowerCase();
-    return actual === language.toLowerCase() || (language === 'zh' && actual.split('-')[0] === 'zh');
-  }
-  private async subtitlesFromNetwork(id: string, language: SourceLanguage) {
-    const wc = this.view.webContents;
-    const generation = this.generation;
-    try {
-    let url: string;
-    const capturedCaption = this.capturedCaptions.get(`${id}/${language}`);
-    if (capturedCaption && Date.now() - capturedCaption.at < 120000) {
-      url = capturedCaption.url;
-      await wc.executeJavaScript(requestNativeCaptions(language, id), true);
-    } else {
-      const captured = new Promise<string>((resolve, reject) => {
-        const timer = setTimeout(() => this.cancelCaptionWait(new Error(`Chưa bắt được phụ đề Dịch tự động (${language}) sau 30 giây. Kiểm tra tùy chọn Dịch tự động của video rồi thử lại.`)), 30000);
-        this.captionWaiter = { videoId: id, language, resolve, reject, timer };
-      });
-      try {
-        // Register the waiter before toggling CC so fast requests cannot be missed.
-        [url] = await Promise.all([captured, wc.executeJavaScript(requestNativeCaptions(language, id), true)]);
-      } finally { this.cancelCaptionWait(new Error('Đã kết thúc chờ request phụ đề.')); }
-    }
-    // Read the full payload before disabling CC; stopping earlier can cancel it.
-    if (Date.now() < this.captionCooldownUntil) throw new Error('YouTube đang giới hạn request phụ đề. Hãy chờ hết thời gian trước khi thử lại.');
-    const input = await wc.executeJavaScript(fetchCapturedCaptions(url, id, language));
-    if (input?.captionRateLimited) throw this.captionRateLimited(input.retryAfter);
-    return input;
-    } finally {
-      // Also turn CC off on failure, without touching a newly navigated video.
-      if (!wc.isDestroyed() && generation === this.generation) {
-        await wc.executeJavaScript(stopNativeCaptions(id), true).catch(() => {});
-      }
-    }
-  }
-  async navigate(url: string) { await this.view.webContents.loadURL(youtubeUrl(url)); }
+
   bounds(b: { x: number; y: number; width: number; height: number } | null) {
     this.layoutBounds = b;
     if (this.htmlFullscreen) { this.resizeView(); return; }
     if (!b) { this.view.setVisible(false); void this.playback('pause'); return; }
     if (!Object.values(b).every(Number.isFinite)) throw new Error('Kích thước không hợp lệ.');
     const [w, h] = this.window.getContentSize();
-    const x = Math.max(0, Math.min(w, Math.round(b.x))), y = Math.max(0, Math.min(h, Math.round(b.y)));
-    this.view.setBounds({ x, y, width: Math.max(0, Math.min(w - x, Math.round(b.width))), height: Math.max(0, Math.min(h - y, Math.round(b.height))) });
+    const x = Math.max(0, Math.min(w, Math.round(b.x)));
+    const y = Math.max(0, Math.min(h, Math.round(b.y)));
+    this.view.setBounds({
+      x,
+      y,
+      width: Math.max(0, Math.min(w - x, Math.round(b.width))),
+      height: Math.max(0, Math.min(h - y, Math.round(b.height)))
+    });
     this.view.setVisible(true);
   }
+
   async playback(action: 'pause' | 'play' | 'seek', time?: number) {
     if (action === 'seek' && (!Number.isFinite(time) || time! < 0)) throw new Error('Mốc thời gian không hợp lệ.');
-    const command = action === 'seek' ? `v.currentTime = ${Number(time)}` : action === 'play' ? 'await v.play()' : action === 'pause' ? 'v.pause()' : '';
-    if (!command) throw new Error('Thao tác không hợp lệ.');
-    await this.view.webContents.executeJavaScript(`(async () => { const v = document.querySelector('video'); if(v) { ${command}; } })()`, true).catch(() => {});
+    await this.controlVideo({ type: action, value: time });
   }
-  async retry() { await this.startTranslation(this.state.videoId); }
-  async loadSubtitles(id: string, language?: SourceLanguage, forceRefresh: boolean = false) {
-    if (this.loadingCaptions) return;
-    this.loadingCaptions = true;
-    try { await this.loadSubtitlesOnce(id, language, forceRefresh); }
-    finally { this.loadingCaptions = false; }
+
+  async controlVideo(cmd: VideoControlCommand) {
+    if (this.view.webContents.isDestroyed()) return;
+    await this.view.webContents.executeJavaScript(controlVideoScript(cmd), true).catch(() => {});
   }
-  private async loadSubtitlesOnce(id: string, language?: SourceLanguage, forceRefresh: boolean = false) {
-    language = language || this.state.detectedSourceLanguage;
-    if (!isCaptionLanguage(language)) throw new Error('Chưa nhận diện được ngôn ngữ video. Hãy chọn ngôn ngữ phụ đề trước.');
-    if (!/^[\w-]{11}$/.test(id)) throw new Error('Chọn một video trước khi lấy phụ đề.');
-    const allowed = ['IDLE', 'CAPTIONS_READY', 'ERROR', 'NO_SUBTITLES'];
-    if (!allowed.includes(this.state.phase)) return;
-    const key = `${id}/${language}`;
 
-    const generation = this.generation;
-    const info = await this.view.webContents.executeJavaScript(inspectVideo);
-    if (generation !== this.generation || info.id !== id || !info.valid) throw new Error('Video đã thay đổi hoặc chưa tải xong.');
-    if (!allowed.includes(this.state.phase)) return;
-    if (info.ad) throw new Error('Chờ quảng cáo kết thúc rồi lấy phụ đề.');
+  async updateOverlay(payload: OverlayStatePayload) {
+    if (this.view.webContents.isDestroyed() || !isYoutubePage(this.view.webContents.getURL())) return;
+    await this.view.webContents.executeJavaScript(updateOverlayScript(payload), true).catch(() => {});
+  }
 
-    if (!forceRefresh) {
-      const memCached = this.captionData.get(key);
-      const cached = memCached?.subtitles || await this.service.getCachedSubtitles(id, language);
-      if (cached && cached.length) {
-        this.reset();
-        this.state.sourceLanguage = language;
-        this.state.videoId = id;
-        this.state.title = info.title;
-        this.loadedSubtitles = cached;
-        this.captionData.set(key, { subtitles: cached, at: Date.now() });
-        this.state.chunks = this.loadedSubtitles.map((s, id) => ({ ...s, id, ready: false }));
-        this.state.total = this.loadedSubtitles.length;
-        this.state.phase = 'CAPTIONS_READY';
-        this.state.subtitlesCached = true;
+  getOverlayAnchor(): OverlayAnchor | null {
+    return this.overlayAnchor;
+  }
+
+  setTranscriptOpen(open: boolean) {
+    this.transcriptOpen = Boolean(open);
+  }
+
+  async stopDubbing() {
+    const id = this.state.videoId;
+    const title = this.state.title;
+    this.segmentAbortController?.abort();
+    this.segmentAbortController = null;
+    this.segmentLoadInFlight = false;
+    this.dubbingActive = false;
+    this.state.dubbingActive = false;
+    if (this.state.phase === 'PLAYING' || this.state.phase === 'BUFFERING' || this.state.phase === 'EXTRACTING') {
+      this.state.phase = this.state.cues?.length ? 'CAPTIONS_READY' : 'IDLE';
+    }
+    this.state.videoId = id;
+    this.state.title = title;
+    if (id && !this.view.webContents.isDestroyed()) {
+      await this.view.webContents.executeJavaScript(revertCaptionsToggleScript(id), true).catch(() => {});
+    }
+  }
+
+  /**
+   * Dual-layer timedtext URL capture:
+   * 1. Passive wait (up to 1,500ms unless `fresh: true`) for Layer 1 (`page`) or Layer 2 (`background`).
+   * 2. Active CC toggle (off -> 150ms -> on) + up to 15,000ms wait.
+   * 3. Priority selection: `['page', 'background', 'potless']`.
+   */
+  private async captureTimedtextUrl(
+    videoId: string,
+    fallbackBaseUrl: string | undefined,
+    token: number,
+    options: { fresh?: boolean } = {}
+  ): Promise<string> {
+    const wc = this.view.webContents;
+    const minAt = options.fresh ? Date.now() : 0;
+
+    const findCandidate = () => {
+      const all = [...this.pageObservedTimedtext, ...this.bgObservedTimedtext].filter(c => c.at >= minAt);
+      return pickBestTimedtext(all, videoId);
+    };
+
+    // Step 1: passive wait (1,500ms) when not forcing a fresh capture
+    if (!options.fresh) {
+      const passiveEnd = Date.now() + PASSIVE_TIMEDTEXT_WAIT_MS;
+      while (Date.now() < passiveEnd) {
+        if (token !== this.generation) throw new Error('Video đã thay đổi.');
+        const hit = findCandidate();
+        if (hit && (hit.source === 'page' || hit.source === 'background')) {
+          return buildSourceTimedtextUrl(hit.url, null);
+        }
+        await sleep(150);
+      }
+    }
+
+    // Step 2: active toggle of YouTube CC button
+    await wc.executeJavaScript(toggleCaptionsForCaptureScript(videoId, Boolean(options.fresh)), true).catch(() => {});
+
+    const activeEnd = Date.now() + ACTIVE_TIMEDTEXT_WAIT_MS;
+    try {
+      while (Date.now() < activeEnd) {
+        if (token !== this.generation) throw new Error('Video đã thay đổi.');
+        const hit = findCandidate();
+        if (hit && (hit.source === 'page' || hit.source === 'background')) {
+          return buildSourceTimedtextUrl(hit.url, null);
+        }
+        await sleep(200);
+      }
+    } finally {
+      if (!wc.isDestroyed() && token === this.generation) {
+        await wc.executeJavaScript(revertCaptionsToggleScript(videoId), true).catch(() => {});
+      }
+    }
+
+    // Step 3: accept potless observation or track.baseUrl fallback
+    const finalHit = findCandidate();
+    if (finalHit) return buildSourceTimedtextUrl(finalHit.url, null);
+    if (fallbackBaseUrl) return buildSourceTimedtextUrl(fallbackBaseUrl, null);
+    throw new Error('Không bắt được URL phụ đề YouTube (/api/timedtext).');
+  }
+
+  private async downloadTimedtextInPage(url: string, videoId: string): Promise<{
+    ok: boolean;
+    status: number;
+    text?: string;
+    rateLimited?: boolean;
+    retryAfter?: string | null;
+    error?: string;
+  }> {
+    return this.view.webContents.executeJavaScript(downloadTimedtextInPageScript(url, videoId), true);
+  }
+
+  private rebuildMergedTimeline() {
+    const ordered = [...this.loadedSegments.values()].sort((a, b) => a.index - b.index);
+    const cues: DubbingCue[] = [];
+    const soundsRaw: SoundCue[] = [];
+    let nextId = 0;
+
+    for (const seg of ordered) {
+      for (const cue of seg.cues) {
+        cues.push({
+          ...cue,
+          id: nextId++,
+          end: cue.end ?? (cue.start + cue.duration)
+        });
+      }
+      for (const s of seg.sounds || []) {
+        soundsRaw.push(s);
+      }
+    }
+
+    cues.sort((a, b) => a.start - b.start);
+    const sounds = dedupeAndSortSounds(soundsRaw);
+
+    this.state.cues = cues;
+    this.state.sounds = sounds;
+    this.state.loadedSegments = this.loadedSegments.size;
+    this.state.totalSegments = this.totalSegments;
+    // Keep legacy chunks view synced so sidebar progress & list always work seamlessly
+    this.state.chunks = cues.map((c, idx) => ({
+      id: idx,
+      start: c.start,
+      end: c.end,
+      text: c.text,
+      sourceText: c.sourceText,
+      sig: c.sig,
+      ready: true
+    }));
+    this.state.total = Math.max(this.totalSegments, cues.length ? this.totalSegments || 1 : 0);
+    this.state.ready = this.loadedSegments.size;
+    this.state.initialRequired = 1;
+  }
+
+  /**
+   * Main v2 Progressive Realtime Dubbing entry point:
+   * - Polls player metadata (3s / 300ms retry)
+   * - Selects source track (`selectSourceTrack`) & checks language match (`findYouTubeLanguage`, `isSameSpokenLanguage`)
+   * - Fast Path: native human target track (`tlang=null`) -> YouTube auto-translate (`tlang`, respecting 30-min 429 breaker) -> gzip `POST /youtube-subtitles`
+   * - Segmented AI Path: progressive on-demand `POST /segments` starting at current playback time (no 20% wait from 0!)
+   */
+  async startDubbing(id: string, options: StartDubbingOptions = {}) {
+    if (!/^[\w-]{11}$/.test(id)) throw new Error('Chọn một video YouTube trước khi bật lồng tiếng.');
+    const token = ++this.generation;
+    this.segmentAbortController?.abort();
+    this.segmentAbortController = new AbortController();
+    this.segmentLoadInFlight = false;
+    this.loadedSegments.clear();
+    this.totalSegments = 0;
+    this.activeSourceUrl = '';
+    this.activeSourceText = '';
+    this.lastSegmentPlanAt = 0;
+
+    const targetLang = options.targetLang || this.getDefaultTargetLang() || 'vi';
+    this.targetLang = targetLang;
+    if (options.transcriptOpen !== undefined) this.transcriptOpen = options.transcriptOpen;
+    this.dubbingActive = true;
+
+    this.state = {
+      ...this.state,
+      videoId: id,
+      targetLang,
+      phase: 'EXTRACTING',
+      error: '',
+      cues: [],
+      sounds: [],
+      chunks: [],
+      ready: 0,
+      total: 0,
+      loadedSegments: 0,
+      totalSegments: 0,
+      dubbingActive: true,
+      autoTranslatePausedUntil: this.autoTranslatePausedUntil
+    };
+
+    try {
+      const meta = await this.view.webContents.executeJavaScript(pollPlayerMetadataScript(id), true) as {
+        ok: boolean;
+        title?: string;
+        live?: boolean;
+        originalAudioLanguage?: string;
+        tracks?: CaptionTrackInfo[];
+        translationLanguages?: TranslationLanguageInfo[];
+      };
+
+      if (token !== this.generation) return;
+      if (!meta?.ok) throw new Error('Chưa đọc được thông tin video từ YouTube Player. Hãy thử lại.');
+      if (meta.live) {
+        this.dubbingActive = false;
+        this.state.dubbingActive = false;
+        this.state.phase = 'NO_SUBTITLES';
+        this.state.error = 'Chưa hỗ trợ livestream trực tiếp.';
         return;
       }
-    } else {
-      this.captionData.delete(key);
-      await this.service.clearSubtitles(id, language);
-    }
 
-    if (Date.now() < this.captionCooldownUntil) {
-      throw new Error(`YouTube đang giới hạn lấy phụ đề. Chờ ${Math.ceil((this.captionCooldownUntil - Date.now()) / 1000)} giây trước khi thử lại.`);
-    }
+      const tracks = meta.tracks || [];
+      const translationLanguages = meta.translationLanguages || [];
+      this.state.title = meta.title || this.state.title;
+      this.state.tracks = tracks;
+      this.state.detectedSourceLanguage = meta.originalAudioLanguage || '';
 
-    this.reset();
-    this.state.sourceLanguage = language;
-    this.state.videoId = id; this.state.title = info.title;
-    if (info.live) { this.state.phase = 'NO_SUBTITLES'; this.state.error = 'V2 chưa hỗ trợ livestream.'; return; }
-    this.state.phase = 'EXTRACTING';
-    const token = this.generation;
-    try {
-      const input = await this.subtitlesFromNetwork(id, language);
-      if (token !== this.generation) return;
-      this.loadedSubtitles = normalizeTimeline(input);
-      if (this.loadedSubtitles.length) {
-        this.captionData.delete(key);
-        this.captionData.set(key, { subtitles: this.loadedSubtitles, at: Date.now() });
-        if (this.captionData.size > 8) this.captionData.delete(this.captionData.keys().next().value!);
-        await this.service.saveSubtitles(id, language, this.loadedSubtitles);
+      if (!tracks.length) {
+        this.dubbingActive = false;
+        this.state.dubbingActive = false;
+        this.state.phase = 'NO_SUBTITLES';
+        this.state.error = 'Video này không có phụ đề khả dụng.';
+        return;
       }
-      this.state.chunks = this.loadedSubtitles.map((s, id) => ({ ...s, id, ready: false }));
-      this.state.total = this.loadedSubtitles.length;
-      this.state.phase = this.loadedSubtitles.length ? 'CAPTIONS_READY' : 'NO_SUBTITLES';
-      this.state.subtitlesCached = false;
-    } catch (e) {
-      if (token === this.generation) { this.state.phase = 'ERROR'; this.state.error = e instanceof Error ? e.message : String(e); }
+
+      const preferredSourceLang = options.sourceLang || meta.originalAudioLanguage || undefined;
+      const sourceTrack = selectSourceTrack(tracks, preferredSourceLang);
+      if (!sourceTrack) {
+        this.dubbingActive = false;
+        this.state.dubbingActive = false;
+        this.state.phase = 'NO_SUBTITLES';
+        this.state.error = 'Không tìm thấy track phụ đề nguồn phù hợp.';
+        return;
+      }
+
+      this.activeSourceLang = sourceTrack.languageCode;
+      this.state.sourceLanguage = sourceTrack.languageCode;
+
+      // Capture authorized source URL (dual-layer sniffer with pot + 60s expiry validation)
+      const capturedUrl = await this.captureTimedtextUrl(id, sourceTrack.baseUrl, token, {
+        fresh: Boolean(options.forceRefresh)
+      });
+      if (token !== this.generation) return;
+      this.activeSourceUrl = capturedUrl;
+
+      // Download source text once client-side for bilingual pairing & worker fallback
+      let sourceText: string | undefined;
+      const srcDl = await this.downloadTimedtextInPage(capturedUrl, id);
+      if (token !== this.generation) return;
+      if (srcDl.ok && srcDl.text) {
+        sourceText = srcDl.text;
+        this.activeSourceText = srcDl.text;
+      }
+
+      // === FAST PATH 1: Native target track (tlang=null) ===
+      const manualTargetCodes = tracks.filter(t => !t.isAutoGenerated).map(t => t.languageCode);
+      const nativeTargetCode = findYouTubeLanguage(targetLang, manualTargetCodes);
+      const nativeTargetTrack = nativeTargetCode
+        ? tracks.find(t => !t.isAutoGenerated && t.languageCode === nativeTargetCode)
+        : undefined;
+
+      // Also if source track itself is already in the target spoken language
+      const sourceAlreadyTarget = isSameSpokenLanguage(sourceTrack.languageCode, targetLang);
+
+      if (nativeTargetTrack?.baseUrl || (sourceAlreadyTarget && sourceText)) {
+        let targetText = sourceAlreadyTarget ? sourceText : undefined;
+        if (!targetText && nativeTargetTrack?.baseUrl) {
+          const nativeUrl = buildSourceTimedtextUrl(nativeTargetTrack.baseUrl, null);
+          const nativeDl = await this.downloadTimedtextInPage(nativeUrl, id);
+          if (token !== this.generation) return;
+          if (nativeDl.ok && nativeDl.text && nativeDl.text.length <= MAX_SUBTITLE_PAYLOAD_CHARS) {
+            targetText = nativeDl.text;
+          }
+        }
+        if (targetText && targetText.length <= MAX_SUBTITLE_PAYLOAD_CHARS) {
+          const fastResult = await this.dubbingClient.submitYoutubeSubtitles({
+            videoId: id,
+            targetLang,
+            sourceLang: sourceTrack.languageCode,
+            subtitleText: targetText,
+            sourceText: sourceAlreadyTarget ? undefined : sourceText
+          });
+          if (token !== this.generation) return;
+          this.applyAllSegments(fastResult.segments, fastResult.totalSegments, 'youtube');
+          return;
+        }
+      }
+
+      // === FAST PATH 2: YouTube Auto-Translate (tlang) if 30-min 429 breaker is NOT tripped ===
+      const canAutoTranslate = Date.now() >= this.autoTranslatePausedUntil && sourceTrack.isTranslatable;
+      const tlangCode = canAutoTranslate
+        ? findYouTubeLanguage(targetLang, translationLanguages.map(l => l.languageCode))
+        : null;
+
+      if (tlangCode) {
+        const autoUrl = buildSourceTimedtextUrl(capturedUrl, tlangCode);
+        const autoDl = await this.downloadTimedtextInPage(autoUrl, id);
+        if (token !== this.generation) return;
+
+        if (autoDl.rateLimited || autoDl.status === 429) {
+          this.autoTranslatePausedUntil = Date.now() + AUTO_TRANSLATE_429_COOLDOWN_MS;
+          this.state.autoTranslatePausedUntil = this.autoTranslatePausedUntil;
+        } else if (autoDl.ok && autoDl.text && autoDl.text.length <= MAX_SUBTITLE_PAYLOAD_CHARS) {
+          const fastResult = await this.dubbingClient.submitYoutubeSubtitles({
+            videoId: id,
+            targetLang,
+            sourceLang: sourceTrack.languageCode,
+            subtitleText: autoDl.text,
+            sourceText
+          });
+          if (token !== this.generation) return;
+          if (fastResult.segments.length > 0) {
+            this.applyAllSegments(fastResult.segments, fastResult.totalSegments, 'youtube');
+            return;
+          }
+        }
+      }
+
+      // === SEGMENTED AI PATH: Progressive on-demand streaming from current playback time ===
+      this.state.phase = 'BUFFERING';
+      await this.loadSegmentNow({ currentTime: Math.max(0, this.state.time) }, token);
+    } catch (err) {
+      if (token === this.generation) {
+        this.dubbingActive = false;
+        this.state.dubbingActive = false;
+        this.state.phase = 'ERROR';
+        this.state.error = err instanceof Error ? err.message : String(err);
+      }
     }
   }
-  async startTranslation(id: string) {
-    if (!/^[\w-]{11}$/.test(id)) throw new Error('Chọn một video trước khi dịch.');
-    if (!['CAPTIONS_READY', 'ERROR'].includes(this.state.phase)) return;
-    if (!this.loadedSubtitles.length) throw new Error('Nhấn Lấy phụ đề thành công trước khi dịch.');
-    const generation = this.generation;
-    const info = await this.view.webContents.executeJavaScript(inspectVideo);
-    if (id === this.state.videoId && !['CAPTIONS_READY', 'ERROR'].includes(this.state.phase)) return;
-    if (generation !== this.generation || info.id !== id || !info.valid) throw new Error('Video đã thay đổi hoặc chưa tải xong. Hãy chọn lại video.');
-    if (info.ad) throw new Error('Chờ quảng cáo kết thúc rồi nhấn Dịch.');
-    if (!['CAPTIONS_READY', 'ERROR'].includes(this.state.phase)) return;
-    const subtitles = this.loadedSubtitles;
-    const language = this.state.sourceLanguage || 'en';
-    // Cached voiceover remains playable offline. Only contact the worker when
-    // at least one audio chunk still needs to be generated.
-    const cached = await this.service.snapshot(id, language);
-    const fullyCached = cached.chunks.length > 0 && cached.chunks.every(chunk => chunk.ready);
-    if (!fullyCached) await this.service.health();
-    if (generation !== this.generation || this.state.videoId !== id) return;
-    this.reset();
-    this.state.sourceLanguage = language;
-    this.loadedSubtitles = subtitles;
-    this.state.videoId = id; this.state.title = info.title;
-    if (info.live) { this.state.phase = 'NO_SUBTITLES'; this.state.error = 'V2 chưa hỗ trợ livestream.'; return; }
-    this.state.phase = 'BUFFERING';
-    const token = this.generation;
-    await this.playback('pause');
-    if (token === this.generation) void this.prepare(id, token);
+
+  private applyAllSegments(
+    segments: DubbingSegment[],
+    totalSegments: number,
+    translationSource: 'youtube' | 'ai' | 'direct-worker'
+  ) {
+    this.loadedSegments.clear();
+    for (const seg of segments) {
+      this.loadedSegments.set(seg.index, seg);
+    }
+    this.totalSegments = Math.max(totalSegments, segments.length);
+    this.state.translationSource = translationSource;
+    this.rebuildMergedTimeline();
+    this.state.phase = this.state.cues && this.state.cues.length > 0 ? 'COMPLETE' : 'NO_SUBTITLES';
   }
-  private async prepare(id: string, token: number) {
+
+  /**
+   * Single-flight progressive segment fetcher:
+   * - Calls `DubbingClient.fetchSegment` (2 retries x 1000ms)
+   * - On `SUBTITLE_DOWNLOAD_FAILED`, immediately recaptures a fresh `pot` URL & retries once.
+   */
+  private async loadSegmentNow(
+    plan: { currentTime: number } | { segment: number },
+    token: number
+  ): Promise<void> {
+    if (this.segmentLoadInFlight || token !== this.generation || !this.dubbingActive) return;
+    this.segmentLoadInFlight = true;
+    const signal = this.segmentAbortController?.signal;
+
     try {
-      const cached = await this.service.snapshot(id, this.state.sourceLanguage);
+      const requestOnce = () => this.dubbingClient.fetchSegment({
+        videoId: this.state.videoId,
+        subtitleUrl: this.activeSourceUrl || undefined,
+        subtitleText: this.activeSourceText || undefined,
+        targetLang: this.targetLang,
+        sourceLang: this.activeSourceLang || undefined,
+        ...plan
+      }, signal);
+
+      let result;
+      try {
+        result = await requestOnce();
+      } catch (err) {
+        if (err instanceof SubtitleDownloadFailedError && token === this.generation) {
+          // Capture fresh `pot` URL if pot was present (or refresh source text) and retry once
+          const sourceTrack = selectSourceTrack(this.state.tracks || [], this.activeSourceLang);
+          const freshUrl = await this.captureTimedtextUrl(
+            this.state.videoId,
+            sourceTrack?.baseUrl,
+            token,
+            { fresh: true }
+          );
+          if (token !== this.generation) return;
+          this.activeSourceUrl = freshUrl;
+          const freshDl = await this.downloadTimedtextInPage(freshUrl, this.state.videoId);
+          if (freshDl.ok && freshDl.text) this.activeSourceText = freshDl.text;
+          result = await requestOnce();
+        } else {
+          throw err;
+        }
+      }
+
       if (token !== this.generation) return;
-      this.state.cached = cached.chunks.length > 0 && cached.chunks.every(c => c.ready);
-      if (this.state.cached) { this.state.phase = 'BUFFERING'; return; }
-      const subs = cached.chunks.length ? undefined : this.loadedSubtitles;
-      if (token !== this.generation) return;
-      if (subs && !subs.length) { this.state.phase = 'NO_SUBTITLES'; return; }
-      await this.service.start(id, subs, this.state.sourceLanguage);
-      if (token === this.generation) this.state.phase = 'BUFFERING';
-    } catch (e) { if (token === this.generation) { this.state.phase = 'ERROR'; this.state.error = e instanceof Error ? e.message : String(e); } }
+      this.totalSegments = Math.max(this.totalSegments, result.totalSegments);
+      this.loadedSegments.set(result.segment.index, result.segment);
+      this.state.translationSource = result.translationSource;
+      this.rebuildMergedTimeline();
+
+      if (this.loadedSegments.size >= this.totalSegments && this.totalSegments > 0) {
+        this.state.phase = 'COMPLETE';
+      } else {
+        this.state.phase = 'PLAYING';
+      }
+    } catch (err) {
+      if (token === this.generation && !(err instanceof Error && err.message === 'Aborted')) {
+        // Keep playing already loaded segments if we have them; only fail hard if 0 loaded
+        if (this.loadedSegments.size === 0) {
+          this.dubbingActive = false;
+          this.state.dubbingActive = false;
+          this.state.phase = 'ERROR';
+          this.state.error = err instanceof Error ? err.message : String(err);
+        } else {
+          this.state.error = err instanceof Error ? err.message : String(err);
+        }
+      }
+    } finally {
+      this.segmentLoadInFlight = false;
+    }
   }
+
+  // Backward-compatible IPC hooks routed to v2 realtime dubbing
+  async loadSubtitles(id: string, language?: SourceLanguage, forceRefresh = false) {
+    await this.startDubbing(id, {
+      sourceLang: language,
+      targetLang: this.getDefaultTargetLang(),
+      forceRefresh
+    });
+  }
+
+  async startTranslation(id: string) {
+    await this.startDubbing(id, {
+      sourceLang: this.state.sourceLanguage,
+      targetLang: this.getDefaultTargetLang()
+    });
+  }
+
+  async retry() {
+    if (!this.state.videoId) return;
+    await this.startDubbing(this.state.videoId, {
+      sourceLang: this.state.sourceLanguage,
+      targetLang: this.targetLang || this.getDefaultTargetLang(),
+      forceRefresh: true
+    });
+  }
+
   private async tick() {
     if (this.busy || this.view.webContents.isDestroyed()) return;
-    // Do not inject player scripts into Google authentication pages.
     if (!isYoutubePage(this.view.webContents.getURL())) return;
     this.busy = true;
     const token = this.generation;
     try {
       const info = await this.view.webContents.executeJavaScript(inspectVideo);
       if (token !== this.generation) return;
-      if (!/^[\w-]{11}$/.test(info.id)) { if (this.state.videoId) this.reset(); return; }
-      if (info.id !== this.state.videoId) {
-        this.reset(); this.state.videoId = info.id; this.state.title = info.title;
+
+      if (!/^[\w-]{11}$/.test(info.id)) {
+        if (this.state.videoId) this.reset();
+        return;
       }
-      Object.assign(this.state, { time: info.time, paused: info.paused, rate: info.rate, muted: info.muted, volume: info.volume });
-      if (!info.valid || info.ad) { this.state.paused = true; return; }
+
+      if (info.id !== this.state.videoId) {
+        this.reset();
+        this.state.videoId = info.id;
+        this.state.title = info.title;
+      }
+
+      if (Array.isArray(info.observedTimedtext)) {
+        this.pageObservedTimedtext = info.observedTimedtext;
+      }
+      if (info.overlayAnchor && typeof info.overlayAnchor.pct === 'number') {
+        this.overlayAnchor = info.overlayAnchor;
+      }
+
+      Object.assign(this.state, {
+        time: info.time,
+        duration: info.duration,
+        paused: info.paused,
+        ended: info.ended,
+        buffering: info.buffering,
+        adShowing: info.ad,
+        rate: info.rate,
+        muted: info.muted,
+        volume: info.volume,
+        seekVersion: info.seekVersion,
+        overlayAnchor: this.overlayAnchor || undefined
+      });
+
+      if (!info.valid) {
+        this.state.paused = true;
+        return;
+      }
+
       this.state.title = info.title;
       this.state.captionLanguages = info.captionLanguages || [];
-      this.state.detectedSourceLanguage = isCaptionLanguage(info.detectedSourceLanguage) ? info.detectedSourceLanguage : '';
-      if (['IDLE', 'CAPTIONS_READY'].includes(this.state.phase)) return;
-      if (this.state.phase === 'BUFFERING') await this.playback('pause');
-      if (['ERROR', 'NO_SUBTITLES', 'EXTRACTING'].includes(this.state.phase)) return;
-      const current = this.generation;
-      const result = await this.service.snapshot(info.id, this.state.sourceLanguage);
-      if (current !== this.generation) return;
-      const chunks = result.chunks, total = chunks.length;
-      const progress = packProgress(chunks);
-      Object.assign(this.state, { chunks, total, ready: progress.ready, initialRequired: progress.initialRequired });
-      if (result.error) { this.state.phase = 'ERROR'; this.state.error = result.error; await this.playback('pause'); return; }
-      if (!total) return;
-      const initialReady = progress.canStart;
-      if (!this.released && initialReady) {
-        this.released = true; await this.playback('seek', 0); await this.playback('play');
+      this.state.tracks = info.tracks || [];
+      this.state.detectedSourceLanguage = isCaptionLanguage(info.detectedSourceLanguage)
+        ? info.detectedSourceLanguage
+        : '';
+
+      // Progressive segment planner: 1,000ms cadence + immediate reset on seeked; skipped during ads
+      if (this.dubbingActive && !info.ad && !this.segmentLoadInFlight && this.totalSegments > 0) {
+        if (info.seekVersion !== this.lastSeekVersion) {
+          this.lastSeekVersion = info.seekVersion;
+          this.lastSegmentPlanAt = 0; // immediate fetch on seek
+        }
+
+        const now = Date.now();
+        if (now - this.lastSegmentPlanAt >= SEGMENT_PLAN_CADENCE_MS) {
+          this.lastSegmentPlanAt = now;
+          const plan = planSegmentLoad(info.time, this.loadedSegments, this.totalSegments);
+          if (plan) {
+            void this.loadSegmentNow(plan, token);
+          } else if (this.transcriptOpen) {
+            // Eager transcript backfill when transcript panel is open
+            const missing = nextMissingSegment(this.loadedSegments, this.totalSegments);
+            if (missing !== null) {
+              void this.loadSegmentNow({ segment: missing }, token);
+            }
+          }
+        }
       }
-      if (this.released) {
-        // Pause when playback/seek reaches an unfinished pack, resume only this automatic pause.
-        const missing = chunks.find(c => !c.ready && c.start <= info.time + .5 && c.end > info.time);
-        if (missing && !this.buffering && !info.paused) { this.buffering = true; await this.playback('pause'); }
-        if (this.buffering && !missing) { this.buffering = false; await this.playback('play'); }
-        this.state.phase = this.buffering ? 'BUFFERING' : this.state.ready === total ? 'COMPLETE' : 'PLAYING';
+    } catch (e) {
+      if (token === this.generation && !this.view.webContents.isLoading()) {
+        this.state.error = String(e);
       }
-    } catch (e) { if (token === this.generation && !this.view.webContents.isLoading()) { this.state.error = String(e); } }
-    finally { this.busy = false; }
+    } finally {
+      this.busy = false;
+    }
   }
+
   async persistSession() {
     if (this.view.webContents.isDestroyed()) return;
     const session = this.view.webContents.session;
     session.flushStorageData();
     await session.cookies.flushStore();
   }
+
   close() {
-    clearInterval(this.timer); this.generation++;
+    clearInterval(this.timer);
+    this.generation++;
+    this.segmentAbortController?.abort();
     this.window.removeListener('resize', this.resizeView);
-    this.cancelCaptionWait(new Error('Đã đóng phiên YouTube.'));
     if (!this.view.webContents.isDestroyed()) {
       this.view.webContents.session.webRequest.onCompleted(null);
       this.view.webContents.close();

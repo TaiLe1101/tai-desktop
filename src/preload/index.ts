@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { DesktopApi, UpdateState } from '../shared/types';
+
 const api: DesktopApi = {
   voice: enabled => ipcRenderer.invoke('tai:voice', enabled),
   navigate: url => ipcRenderer.invoke('tai:navigate', url),
@@ -22,6 +23,18 @@ const api: DesktopApi = {
     const handler = (_event: unknown, state: UpdateState) => listener(state);
     ipcRenderer.on('tai:update-status', handler);
     return () => { ipcRenderer.removeListener('tai:update-status', handler); };
-  }
+  },
+  // Realtime v2 APIs
+  startDubbing: (videoId, options) => ipcRenderer.invoke('tai:start-dubbing', videoId, options),
+  stopDubbing: () => ipcRenderer.invoke('tai:stop-dubbing'),
+  setTranscriptOpen: open => ipcRenderer.invoke('tai:set-transcript-open', open),
+  synthesizeTts: req => ipcRenderer.invoke('tai:synthesize-tts', req),
+  controlVideo: cmd => ipcRenderer.invoke('tai:control-video', cmd),
+  updateOverlay: payload => ipcRenderer.invoke('tai:update-overlay', payload),
+  getOverlayAnchor: () => ipcRenderer.invoke('tai:get-overlay-anchor'),
+  reportSessions: sessions => ipcRenderer.invoke('tai:report-sessions', sessions),
+  saveDubbingPrefs: prefs => ipcRenderer.invoke('tai:save-dubbing-prefs', prefs),
+  dubbingHealth: () => ipcRenderer.invoke('tai:dubbing-health')
 };
+
 contextBridge.exposeInMainWorld('tai', api);
