@@ -1,5 +1,6 @@
 ﻿import {
   AUDIO_RATE_MAX,
+  INCREMENTAL_FLUSH_INTERVAL_MS,
   LOOKAHEAD_CUES,
   PlaybackClock,
   TAIL_OVERLAP_SECONDS,
@@ -13,13 +14,16 @@
   toAlignmentRate,
   type LookaheadCueMetric
 } from '../shared/alignment-policy';
+import { decodeBlockError } from '../shared/saas';
 import { cleanSubtitleText, findNextCue, selectActiveCue, selectActiveSound } from '../shared/subtitles';
 import { computeEffectiveSpeechRate, formatSsmlRate, getSelectedVoice } from '../shared/voices';
 import type {
+  DubbingBlockCode,
   DubbingCue,
   DubbingPreferences,
   DubbingRuntimeStatus,
   OverlayStatePayload,
+  QuotaDto,
   TelemetrySession,
   VideoSession
 } from '../shared/types';
@@ -53,6 +57,8 @@ export interface DubbingControllerCallbacks {
   onStatusChange?: (status: DubbingRuntimeStatus) => void;
   onToast?: (message: string) => void;
   onFirstAudioStart?: () => void;
+  onQuotaUpdate?: (quota: QuotaDto) => void;
+  onBlocked?: (code: DubbingBlockCode, message: string) => void;
 }
 
 function cueIdentity(cue: DubbingCue): string {
@@ -128,6 +134,8 @@ export class VoicePlayer {
 
   // Telemetry stats for active video session
   private sessionStartedAt = 0;
+  private lastIncrementalFlushAt = Date.now();
+  private incrementalFlushInFlight = false;
   private stats = {
     dubbedCues: 0,
     truncatedCues: 0,
@@ -323,15 +331,59 @@ export class VoicePlayer {
     } catch {}
   }
 
+  private flushIncrementalDelta(): void {
+    if (this.incrementalFlushInFlight || !this.lastVideoId) return;
+    const delta = this.clock.consumeDelta();
+    if (delta < 1) {
+      if (delta > 0) this.clock.restoreDelta(delta);
+      return;
+    }
+    this.incrementalFlushInFlight = true;
+    this.lastIncrementalFlushAt = Date.now();
+    const snapStats = { ...this.stats };
+    this.stats = { dubbedCues: 0, truncatedCues: 0, gateForced: 0, fallbackCues: 0 };
+
+    const item: TelemetrySession = {
+      sessionId: `${this.lastVideoId}-${this.sessionStartedAt || Date.now()}`,
+      videoId: this.lastVideoId,
+      sourceLang: this.latestSession?.sourceLanguage,
+      targetLang: this.latestSession?.targetLang || this.latestPrefs?.targetLang || 'vi',
+      translationSource: this.latestSession?.translationSource,
+      watchedSeconds: delta,
+      dubbedCues: snapStats.dubbedCues,
+      truncatedCues: snapStats.truncatedCues,
+      gateForced: snapStats.gateForced,
+      fallbackCues: snapStats.fallbackCues,
+      startedAt: this.sessionStartedAt || Date.now(),
+      endedAt: Date.now()
+    };
+
+    void window.tai.reportSessions([item])
+      .then(res => {
+        if (res.quota) {
+          this.callbacks.onQuotaUpdate?.(res.quota);
+        }
+        if (res.accepted <= 0) {
+          this.clock.restoreDelta(delta);
+        }
+      })
+      .catch(() => {
+        this.clock.restoreDelta(delta);
+      })
+      .finally(() => {
+        this.incrementalFlushInFlight = false;
+      });
+  }
+
   private flushTelemetry(isUnload: boolean): void {
-    const watched = this.clock.watchedSeconds;
+    const watched = this.clock.consumeDelta();
     const queue = this.readTelemetryQueue();
     if (this.lastVideoId && watched > 0.5) {
       queue.push({
         sessionId: `${this.lastVideoId}-${this.sessionStartedAt || Date.now()}`,
         videoId: this.lastVideoId,
         sourceLang: this.latestSession?.sourceLanguage,
-        targetLang: this.latestPrefs?.targetLang || this.latestSession?.targetLang || 'vi',
+        targetLang: this.latestSession?.targetLang || this.latestPrefs?.targetLang || 'vi',
         translationSource: this.latestSession?.translationSource,
         watchedSeconds: watched,
         dubbedCues: this.stats.dubbedCues,
@@ -344,6 +396,9 @@ export class VoicePlayer {
       this.clock.reset();
       this.stats = { dubbedCues: 0, truncatedCues: 0, gateForced: 0, fallbackCues: 0 };
       this.sessionStartedAt = Date.now();
+      this.lastIncrementalFlushAt = Date.now();
+    } else if (watched === 0 && !isUnload) {
+      this.clock.reset();
     }
 
     const bounded = queue.slice(-MAX_TELEMETRY_QUEUE);
@@ -356,6 +411,7 @@ export class VoicePlayer {
     }
     void window.tai.reportSessions(bounded)
       .then(res => {
+        if (res.quota) this.callbacks.onQuotaUpdate?.(res.quota);
         if (res.accepted > 0) this.writeTelemetryQueue([]);
       })
       .catch(() => {});
@@ -404,6 +460,14 @@ export class VoicePlayer {
       // Accumulate watched seconds (0 < dt <= 2s, immune to seeks/ads/pauses)
       const isActivelyWatching = Boolean(enabled && s.dubbingActive && !s.paused && !s.buffering && !s.adShowing);
       this.clock.tick(s.time, isActivelyWatching);
+      if (
+        isActivelyWatching
+        && !this.incrementalFlushInFlight
+        && Date.now() - this.lastIncrementalFlushAt >= INCREMENTAL_FLUSH_INTERVAL_MS
+        && this.clock.pendingDeltaSeconds >= 1
+      ) {
+        this.flushIncrementalDelta();
+      }
 
       // Ad transitions
       const adNow = Boolean(s.adShowing);
@@ -709,6 +773,14 @@ export class VoicePlayer {
         });
       } catch (err) {
         if (speech.controller.signal.aborted || gen !== this.generation) return;
+        const blocked = decodeBlockError(err);
+        if (blocked) {
+          this.stop();
+          void window.tai.playback('pause').catch(() => {});
+          void window.tai.stopDubbing().catch(() => {});
+          this.callbacks.onBlocked?.(blocked.code, blocked.message);
+          return;
+        }
         useFallback = true;
       }
 

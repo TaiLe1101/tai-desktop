@@ -1,11 +1,14 @@
 import { gzipSync } from 'node:zlib';
 import { net } from 'electron';
+import { DubbingAuthOrQuotaError, parseDubbingBlockError } from '../shared/saas';
 import { parseTimedtextPayload } from '../shared/subtitles';
 import { formatSsmlRate } from '../shared/voices';
 import type {
   DubbingCue,
   DubbingHealthResult,
   DubbingSegment,
+  QuotaDto,
+  ReportSessionsResponse,
   SoundCue,
   TelemetrySession,
   TtsSynthesizeRequest,
@@ -25,6 +28,13 @@ export interface ServerSettings {
   serverUrl: string;
   apiKey: string;
   targetLang: string;
+}
+
+export interface DubbingAuthProvider {
+  getAccessToken(): string;
+  refreshSession(): Promise<string | null>;
+  applyQuotaUpdate(quota: QuotaDto): void;
+  markUnauthenticated(reason?: string): Promise<void>;
 }
 
 export class SubtitleDownloadFailedError extends Error {
@@ -105,14 +115,6 @@ async function originIsolatedFetch(
   }
 }
 
-function serverAuthHeaders(apiKey: string): Record<string, string> {
-  if (!apiKey) return {};
-  return {
-    Authorization: `Bearer ${apiKey}`,
-    'x-api-key': apiKey
-  };
-}
-
 function workerAuthHeaders(apiKey: string): Record<string, string> {
   return apiKey ? { 'X-API-Key': apiKey } : {};
 }
@@ -160,8 +162,24 @@ export class DubbingClient {
 
   constructor(
     private readonly getServer: () => ServerSettings,
-    private readonly getWorker: () => WorkerSettings
+    private readonly getWorker: () => WorkerSettings,
+    private readonly auth?: DubbingAuthProvider
   ) {}
+
+  private buildServerHeaders(tokenOverride?: string): Record<string, string> {
+    const server = this.getServer();
+    const headers: Record<string, string> = {};
+    const bearer = tokenOverride ?? this.auth?.getAccessToken() ?? '';
+    if (bearer) {
+      headers.Authorization = `Bearer ${bearer}`;
+    } else if (server.apiKey) {
+      headers.Authorization = `Bearer ${server.apiKey}`;
+    }
+    if (server.apiKey) {
+      headers['x-api-key'] = server.apiKey;
+    }
+    return headers;
+  }
 
   private canTryServer(): boolean {
     const { serverUrl } = this.getServer();
@@ -169,8 +187,60 @@ export class DubbingClient {
   }
 
   private markServerUnavailable() {
-    // Brief cooldown (30s) so consecutive cues/segments fall back directly to worker without waiting
     this.serverDownUntil = Date.now() + 30_000;
+  }
+
+  /**
+   * Executes a SERVER_URL request with:
+   * - Origin-isolated Bearer auth header
+   * - Automatic single 401 refresh + retry
+   * - Typed `DubbingAuthOrQuotaError` on 401 AUTH_REQUIRED / 402 QUOTA_EXCEEDED|SUBSCRIPTION_EXPIRED|NO_SUBSCRIPTION / 403 TENANT_SUSPENDED
+   *   (never silently bypassed to unauthenticated direct worker!)
+   */
+  private async fetchServerWithAuth(
+    path: string,
+    init: RequestInit,
+    timeoutMs: number,
+    signal?: AbortSignal
+  ): Promise<Response> {
+    const server = this.getServer();
+    let res = await originIsolatedFetch(
+      server.serverUrl,
+      path,
+      init,
+      this.buildServerHeaders(),
+      timeoutMs,
+      signal
+    );
+
+    if (res.status === 401 && this.auth) {
+      const nextToken = await this.auth.refreshSession();
+      if (nextToken) {
+        res = await originIsolatedFetch(
+          server.serverUrl,
+          path,
+          init,
+          this.buildServerHeaders(nextToken),
+          timeoutMs,
+          signal
+        );
+      }
+    }
+
+    if (res.status === 401 || res.status === 402 || res.status === 403) {
+      const cloned = res.clone();
+      const body = await cloned.json().catch(() => null);
+      const blockErr = parseDubbingBlockError(res.status, body);
+      if (blockErr) {
+        if (blockErr.quota) this.auth?.applyQuotaUpdate(blockErr.quota);
+        if (blockErr.code === 'AUTH_REQUIRED') {
+          await this.auth?.markUnauthenticated('AUTH_REQUIRED');
+        }
+        throw blockErr;
+      }
+    }
+
+    return res;
   }
 
   async health(): Promise<DubbingHealthResult> {
@@ -181,7 +251,7 @@ export class DubbingClient {
           server.serverUrl,
           '/api/v1/dubbing/health',
           { method: 'GET' },
-          serverAuthHeaders(server.apiKey),
+          this.buildServerHeaders(),
           8_000
         );
         if (res.ok) {
@@ -236,8 +306,8 @@ export class DubbingClient {
 
   /**
    * Fast Path: sends client-downloaded YouTube native/auto-translated captions
-   * compressed with gzip to `POST /api/v1/dubbing/youtube-subtitles`.
-   * Falls back to local parsing if server is unreachable.
+   * compressed with gzip (`Content-Type: application/gzip`) to `POST /api/v1/dubbing/youtube-subtitles`.
+   * Never bypasses `DubbingAuthOrQuotaError`.
    */
   async submitYoutubeSubtitles(payload: {
     videoId: string;
@@ -253,7 +323,6 @@ export class DubbingClient {
       payload = { ...payload, sourceText: undefined };
     }
 
-    const server = this.getServer();
     if (this.canTryServer()) {
       try {
         const json = JSON.stringify(payload);
@@ -261,8 +330,7 @@ export class DubbingClient {
           throw new Error('Gói dữ liệu phụ đề quá lớn.');
         }
         const compressed = gzipSync(Buffer.from(json, 'utf8'));
-        const res = await originIsolatedFetch(
-          server.serverUrl,
+        const res = await this.fetchServerWithAuth(
           '/api/v1/dubbing/youtube-subtitles',
           {
             method: 'POST',
@@ -271,7 +339,6 @@ export class DubbingClient {
             },
             body: new Uint8Array(compressed)
           },
-          serverAuthHeaders(server.apiKey),
           SEGMENT_TIMEOUT_MS
         );
         if (res.ok) {
@@ -296,6 +363,7 @@ export class DubbingClient {
           throw new Error(`Server youtube-subtitles trả HTTP ${res.status}: ${text.slice(0, 160)}`);
         }
       } catch (error) {
+        if (error instanceof DubbingAuthOrQuotaError) throw error;
         if (error instanceof Error && error.message.startsWith('Server youtube-subtitles trả HTTP 4')) {
           throw error;
         }
@@ -303,7 +371,7 @@ export class DubbingClient {
       }
     }
 
-    // Local fallback when server is unset/unreachable: parse timedtext locally
+    // Local fallback ONLY when SERVER_URL is unset or unreachable (never on auth/quota block)
     const parsedTarget = parseTimedtextPayload(payload.subtitleText);
     const parsedSource = payload.sourceText ? parseTimedtextPayload(payload.sourceText) : null;
     if (parsedSource && parsedSource.cues.length) {
@@ -325,8 +393,7 @@ export class DubbingClient {
 
   /**
    * Segmented AI Path: `POST /api/v1/dubbing/segments` with 2 retries x 1,000ms.
-   * Immediately aborts retries on `SUBTITLE_DOWNLOAD_FAILED` so caller captures a fresh `pot` URL.
-   * Falls back to direct worker `POST /translate-segment` when server is unset/unreachable.
+   * Immediately aborts retries on `SUBTITLE_DOWNLOAD_FAILED` and `DubbingAuthOrQuotaError`.
    */
   async fetchSegment(
     payload: {
@@ -340,21 +407,18 @@ export class DubbingClient {
     },
     signal?: AbortSignal
   ): Promise<SegmentFetchResponse> {
-    const server = this.getServer();
     if (this.canTryServer()) {
       let lastErr: unknown;
       for (let attempt = 0; attempt <= SEGMENT_RETRIES; attempt++) {
         if (signal?.aborted) throw new Error('Aborted');
         try {
-          const res = await originIsolatedFetch(
-            server.serverUrl,
+          const res = await this.fetchServerWithAuth(
             '/api/v1/dubbing/segments',
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(payload)
             },
-            serverAuthHeaders(server.apiKey),
             SEGMENT_TIMEOUT_MS,
             signal
           );
@@ -387,7 +451,9 @@ export class DubbingClient {
             throw new Error(`Server segments HTTP ${res.status}: ${text.slice(0, 160)}`);
           }
         } catch (err) {
-          if (err instanceof SubtitleDownloadFailedError || isAbortError(err)) throw err;
+          if (err instanceof DubbingAuthOrQuotaError || err instanceof SubtitleDownloadFailedError || isAbortError(err)) {
+            throw err;
+          }
           lastErr = err;
         }
         if (attempt < SEGMENT_RETRIES) {
@@ -400,7 +466,6 @@ export class DubbingClient {
       }
     }
 
-    // Direct worker fallback via POST /translate-segment
     return this.translateSegmentViaWorker(payload, signal);
   }
 
@@ -499,8 +564,8 @@ export class DubbingClient {
   /**
    * Inline TTS synthesis:
    * - Calls `POST /api/v1/dubbing/tts` when server is available and `sig` is present.
-   * - Falls back to direct worker `POST /synthesize-tts` (then legacy `/process-tts`).
-   * - 15s timeout, 2 retries x 200ms on status >= 500 or network/timeout errors (never retries 4xx/abort).
+   * - NEVER bypasses `DubbingAuthOrQuotaError` (401/402/403) to direct worker.
+   * - Falls back to direct worker `POST /synthesize-tts` ONLY on network/5xx/missing-server.
    */
   async synthesizeTts(req: TtsSynthesizeRequest, signal?: AbortSignal): Promise<TtsSynthesizeResponse> {
     const rateStr = typeof req.rate === 'number' ? formatSsmlRate(req.rate) : (req.rate || '+50%');
@@ -508,9 +573,7 @@ export class DubbingClient {
 
     if (useServer) {
       try {
-        return await this.fetchTtsWithRetry(
-          this.getServer().serverUrl,
-          '/api/v1/dubbing/tts',
+        return await this.fetchServerTtsWithRetry(
           {
             text: req.text,
             lang: req.lang,
@@ -519,12 +582,10 @@ export class DubbingClient {
             sig: req.sig,
             inline: req.inline !== false
           },
-          serverAuthHeaders(this.getServer().apiKey),
           signal
         );
       } catch (err) {
-        if (isAbortError(err)) throw err;
-        // Only mark server unavailable on network/timeout/404/5xx (never on 403/422/other 4xx)
+        if (err instanceof DubbingAuthOrQuotaError || isAbortError(err)) throw err;
         const isClient4xx = err instanceof Error && /HTTP 4(?!04\b)\d\d/.test(err.message);
         if (!isClient4xx) {
           this.markServerUnavailable();
@@ -552,7 +613,6 @@ export class DubbingClient {
       );
     } catch (err) {
       if (isAbortError(err)) throw err;
-      // Only fall back to legacy /process-tts when /synthesize-tts is unimplemented (HTTP 404/405)
       const isMissingEndpoint = err instanceof Error && /HTTP (404|405)\b/.test(err.message);
       if (!isMissingEndpoint) throw err;
       return this.fetchTtsWithRetry(
@@ -568,6 +628,46 @@ export class DubbingClient {
         signal
       );
     }
+  }
+
+  private async fetchServerTtsWithRetry(
+    body: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<TtsSynthesizeResponse> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= TTS_RETRIES; attempt++) {
+      if (signal?.aborted) throw new Error('Aborted');
+      try {
+        const res = await this.fetchServerWithAuth(
+          '/api/v1/dubbing/tts',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+          },
+          TTS_TIMEOUT_MS,
+          signal
+        );
+
+        if (!res.ok) {
+          const err = new Error(`TTS /api/v1/dubbing/tts trả HTTP ${res.status}`);
+          if (res.status >= 500 && attempt < TTS_RETRIES) {
+            lastError = err;
+            await sleep(TTS_RETRY_DELAY_MS);
+            continue;
+          }
+          throw err;
+        }
+        return await this.parseTtsResponse(res);
+      } catch (err) {
+        if (err instanceof DubbingAuthOrQuotaError || isAbortError(err)) throw err;
+        lastError = err;
+        const isHttp4xx = err instanceof Error && /HTTP 4\d\d/.test(err.message);
+        if (isHttp4xx || attempt >= TTS_RETRIES) throw err;
+        await sleep(TTS_RETRY_DELAY_MS);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error('TTS synthesis failed');
   }
 
   private async fetchTtsWithRetry(
@@ -603,56 +703,7 @@ export class DubbingClient {
           }
           throw err;
         }
-
-        const contentType = (res.headers.get('content-type') || '').toLowerCase();
-        const headerDuration = Number(res.headers.get('x-audio-duration'));
-        const voice = res.headers.get('x-tts-voice') || undefined;
-        const rate = res.headers.get('x-tts-rate') || undefined;
-        const cache = res.headers.get('x-cache') || undefined;
-
-        if (contentType.startsWith('audio/')) {
-          const buf = new Uint8Array(await res.arrayBuffer());
-          if (!buf.byteLength) throw new Error('TTS trả audio rỗng.');
-          return {
-            audio: buf,
-            duration: Number.isFinite(headerDuration) && headerDuration > 0 ? headerDuration : undefined,
-            voice,
-            rate,
-            cache
-          };
-        }
-
-        const json = await res.json() as { audioBase64?: string; url?: string; duration?: number; voice?: string; rate?: string };
-        if (json.audioBase64) {
-          const buf = new Uint8Array(Buffer.from(json.audioBase64, 'base64'));
-          return {
-            audio: buf,
-            duration: Number.isFinite(json.duration) && (json.duration as number) > 0 ? json.duration : undefined,
-            voice: json.voice || voice,
-            rate: json.rate || rate,
-            cache
-          };
-        }
-        if (json.url) {
-          // External CDN/R2 URL: NEVER attach API auth headers!
-          const cdnController = new AbortController();
-          const cdnTimer = setTimeout(() => cdnController.abort(), TTS_TIMEOUT_MS);
-          try {
-            const cdnRes = await net.fetch(json.url, { signal: cdnController.signal });
-            if (!cdnRes.ok) throw new Error(`CDN audio HTTP ${cdnRes.status}`);
-            const buf = new Uint8Array(await cdnRes.arrayBuffer());
-            return {
-              audio: buf,
-              duration: Number.isFinite(json.duration) ? json.duration : undefined,
-              voice: json.voice || voice,
-              rate: json.rate || rate,
-              cache
-            };
-          } finally {
-            clearTimeout(cdnTimer);
-          }
-        }
-        throw new Error('TTS response không chứa dữ liệu âm thanh.');
+        return await this.parseTtsResponse(res);
       } catch (err) {
         lastError = err;
         if (isAbortError(err)) throw err;
@@ -664,25 +715,79 @@ export class DubbingClient {
     throw lastError instanceof Error ? lastError : new Error('TTS synthesis failed');
   }
 
-  async reportSessions(sessions: TelemetrySession[]): Promise<{ accepted: number }> {
+  private async parseTtsResponse(res: Response): Promise<TtsSynthesizeResponse> {
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    const headerDuration = Number(res.headers.get('x-audio-duration'));
+    const voice = res.headers.get('x-tts-voice') || undefined;
+    const rate = res.headers.get('x-tts-rate') || undefined;
+    const cache = res.headers.get('x-cache') || undefined;
+
+    if (contentType.startsWith('audio/')) {
+      const buf = new Uint8Array(await res.arrayBuffer());
+      if (!buf.byteLength) throw new Error('TTS trả audio rỗng.');
+      return {
+        audio: buf,
+        duration: Number.isFinite(headerDuration) && headerDuration > 0 ? headerDuration : undefined,
+        voice,
+        rate,
+        cache
+      };
+    }
+
+    const json = await res.json() as { audioBase64?: string; url?: string; duration?: number; voice?: string; rate?: string };
+    if (json.audioBase64) {
+      const buf = new Uint8Array(Buffer.from(json.audioBase64, 'base64'));
+      return {
+        audio: buf,
+        duration: Number.isFinite(json.duration) && (json.duration as number) > 0 ? json.duration : undefined,
+        voice: json.voice || voice,
+        rate: json.rate || rate,
+        cache
+      };
+    }
+    if (json.url) {
+      const cdnController = new AbortController();
+      const cdnTimer = setTimeout(() => cdnController.abort(), TTS_TIMEOUT_MS);
+      try {
+        const cdnRes = await net.fetch(json.url, { signal: cdnController.signal });
+        if (!cdnRes.ok) throw new Error(`CDN audio HTTP ${cdnRes.status}`);
+        const buf = new Uint8Array(await cdnRes.arrayBuffer());
+        return {
+          audio: buf,
+          duration: Number.isFinite(json.duration) ? json.duration : undefined,
+          voice: json.voice || voice,
+          rate: json.rate || rate,
+          cache
+        };
+      } finally {
+        clearTimeout(cdnTimer);
+      }
+    }
+    throw new Error('TTS response không chứa dữ liệu âm thanh.');
+  }
+
+  async reportSessions(sessions: TelemetrySession[]): Promise<ReportSessionsResponse> {
     const trimmed = sessions.slice(0, 20);
     if (!trimmed.length || !this.canTryServer()) return { accepted: 0 };
-    const server = this.getServer();
     try {
-      const res = await originIsolatedFetch(
-        server.serverUrl,
+      const res = await this.fetchServerWithAuth(
         '/api/v1/dubbing/sessions',
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sessions: trimmed })
         },
-        serverAuthHeaders(server.apiKey),
         8_000
       );
       if (!res.ok) return { accepted: 0 };
-      const data = await res.json() as { accepted?: number };
-      return { accepted: Number(data.accepted) || trimmed.length };
+      const data = await res.json() as { accepted?: number; quota?: QuotaDto };
+      if (data.quota) {
+        this.auth?.applyQuotaUpdate(data.quota);
+      }
+      return {
+        accepted: Number(data.accepted) || trimmed.length,
+        ...(data.quota ? { quota: data.quota } : {})
+      };
     } catch {
       return { accepted: 0 };
     }

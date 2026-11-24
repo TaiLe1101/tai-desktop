@@ -97,8 +97,10 @@ export class SettingsStore {
   };
   private encryptedKey = '';
   private encryptedServerKey = '';
+  private encryptedAccessToken = '';
+  private encryptedRefreshToken = '';
   private audioDirectory = '';
-  private saving = false;
+  private persistQueue: Promise<void> = Promise.resolve();
   private file = join(app?.getPath ? app.getPath('userData') : process.cwd(), 'settings.json');
 
   async load() {
@@ -120,6 +122,8 @@ export class SettingsStore {
       };
       this.encryptedKey = typeof data.encryptedKey === 'string' ? data.encryptedKey : '';
       this.encryptedServerKey = typeof data.encryptedServerKey === 'string' ? data.encryptedServerKey : '';
+      this.encryptedAccessToken = typeof data.encryptedAccessToken === 'string' ? data.encryptedAccessToken : '';
+      this.encryptedRefreshToken = typeof data.encryptedRefreshToken === 'string' ? data.encryptedRefreshToken : '';
       if (data.audioDirectory !== undefined && (typeof data.audioDirectory !== 'string' || !isAbsolute(data.audioDirectory))) {
         throw new Error('Thư mục audio không hợp lệ.');
       }
@@ -215,27 +219,63 @@ export class SettingsStore {
     }
   }
 
+  getAuthTokens(): { accessToken: string; refreshToken: string } {
+    const decrypt = (encoded: string): string => {
+      if (!encoded) return '';
+      try {
+        if (safeStorage?.isEncryptionAvailable?.()) {
+          return safeStorage.decryptString(Buffer.from(encoded, 'base64'));
+        }
+        return Buffer.from(encoded, 'base64').toString('utf8');
+      } catch {
+        return '';
+      }
+    };
+    return {
+      accessToken: decrypt(this.encryptedAccessToken),
+      refreshToken: decrypt(this.encryptedRefreshToken)
+    };
+  }
+
+  async setAuthTokens(tokens: { accessToken: string; refreshToken: string } | null): Promise<void> {
+    const encrypt = (plain: string): string => {
+      if (!plain) return '';
+      if (safeStorage?.isEncryptionAvailable?.()) {
+        return safeStorage.encryptString(plain).toString('base64');
+      }
+      return Buffer.from(plain, 'utf8').toString('base64');
+    };
+    this.encryptedAccessToken = tokens?.accessToken ? encrypt(tokens.accessToken) : '';
+    this.encryptedRefreshToken = tokens?.refreshToken ? encrypt(tokens.refreshToken) : '';
+    await this.enqueuePersist();
+  }
+
   private async persist(value: Settings, encryptedKey: string, encryptedServerKey: string, audioDirectory: string) {
-    if (this.saving) throw new Error('Đang lưu cấu hình. Vui lòng thử lại.');
-    this.saving = true;
-    try {
-      await writeFile(
-        `${this.file}.tmp`,
-        JSON.stringify({
-          ...value,
-          encryptedKey,
-          encryptedServerKey,
-          ...(audioDirectory ? { audioDirectory } : {})
-        }, null, 2),
-        { mode: 0o600 }
-      );
+    this.value = value;
+    this.encryptedKey = encryptedKey;
+    this.encryptedServerKey = encryptedServerKey;
+    this.audioDirectory = audioDirectory;
+    await this.enqueuePersist();
+  }
+
+  /**
+   * Serializes settings.json atomic writes via an internal promise queue so
+   * concurrent dubbing preference saves and 401 auth token refreshes never collide.
+   */
+  private enqueuePersist(): Promise<void> {
+    const run = this.persistQueue.catch(() => {}).then(async () => {
+      const payload = JSON.stringify({
+        ...this.value,
+        encryptedKey: this.encryptedKey,
+        encryptedServerKey: this.encryptedServerKey,
+        encryptedAccessToken: this.encryptedAccessToken,
+        encryptedRefreshToken: this.encryptedRefreshToken,
+        ...(this.audioDirectory ? { audioDirectory: this.audioDirectory } : {})
+      }, null, 2);
+      await writeFile(`${this.file}.tmp`, payload, { mode: 0o600 });
       await rename(`${this.file}.tmp`, this.file);
-      this.value = value;
-      this.encryptedKey = encryptedKey;
-      this.encryptedServerKey = encryptedServerKey;
-      this.audioDirectory = audioDirectory;
-    } finally {
-      this.saving = false;
-    }
+    });
+    this.persistQueue = run;
+    return run;
   }
 }

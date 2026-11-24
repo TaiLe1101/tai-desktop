@@ -1,5 +1,6 @@
 import { BrowserWindow, WebContentsView } from 'electron';
 import { DubbingClient, MAX_SUBTITLE_PAYLOAD_CHARS, SubtitleDownloadFailedError } from './dubbing-client';
+import { DubbingAuthOrQuotaError } from '../shared/saas';
 import { VoiceoverService } from './voiceover';
 import {
   controlVideoScript,
@@ -548,7 +549,9 @@ export class YoutubeSession {
       loadedSegments: 0,
       totalSegments: 0,
       dubbingActive: true,
-      autoTranslatePausedUntil: this.autoTranslatePausedUntil
+      autoTranslatePausedUntil: this.autoTranslatePausedUntil,
+      blockCode: undefined,
+      blockQuota: undefined
     };
 
     try {
@@ -687,6 +690,11 @@ export class YoutubeSession {
         this.state.dubbingActive = false;
         this.state.phase = 'ERROR';
         this.state.error = err instanceof Error ? err.message : String(err);
+        if (err instanceof DubbingAuthOrQuotaError) {
+          this.state.blockCode = err.code;
+          this.state.blockQuota = err.quota;
+          await this.playback('pause');
+        }
       }
     }
   }
@@ -765,8 +773,15 @@ export class YoutubeSession {
       }
     } catch (err) {
       if (token === this.generation && !(err instanceof Error && err.message === 'Aborted')) {
-        // Keep playing already loaded segments if we have them; only fail hard if 0 loaded
-        if (this.loadedSegments.size === 0) {
+        if (err instanceof DubbingAuthOrQuotaError) {
+          this.dubbingActive = false;
+          this.state.dubbingActive = false;
+          this.state.phase = 'ERROR';
+          this.state.error = err.message;
+          this.state.blockCode = err.code;
+          this.state.blockQuota = err.quota;
+          await this.playback('pause');
+        } else if (this.loadedSegments.size === 0) {
           this.dubbingActive = false;
           this.state.dubbingActive = false;
           this.state.phase = 'ERROR';

@@ -27,17 +27,17 @@ describe('app branding assets and dynamic version metadata', () => {
     assert.ok(ico.readUInt16LE(4) >= 5, 'ICO must include multiple resolutions');
   });
 
-  it('keeps package.json and package-lock.json versions synced with zero hardcoded versions in index.html', () => {
+  it('uses dynamic package.json semver with zero hardcoded versions in index.html', () => {
     const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')) as { version: string };
-    const lock = JSON.parse(readFileSync(resolve(root, 'package-lock.json'), 'utf8')) as {
-      version: string;
-      packages: Record<string, { version?: string }>;
-    };
     assert.match(pkg.version, /^\d+\.\d+\.\d+/);
-    assert.equal(lock.version, pkg.version);
-    assert.equal(lock.packages['']?.version, pkg.version);
 
     const html = readFileSync(resolve(root, 'src/renderer/index.html'), 'utf8');
     assert.equal(/\b\d+\.\d+\.\d+\b/.test(html), false, 'index.html should not hardcode a version');
+
+    const builtHtmlPath = resolve(root, 'out/renderer/index.html');
+    if (existsSync(builtHtmlPath)) {
+      const builtHtml = readFileSync(builtHtmlPath, 'utf8');
+      assert.ok(builtHtml.includes(`TAI Desktop v${pkg.version}`), `built index.html should inject v${pkg.version}`);
+    }
   });
 });

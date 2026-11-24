@@ -206,16 +206,24 @@ export function computeTargetVolume(
   }
 }
 
+export const INCREMENTAL_FLUSH_INTERVAL_MS = 30_000;
+
 /**
  * Telemetry PlaybackClock: accumulates only small forward playback steps (0 < dt <= 2s),
  * making watchedSeconds immune to seeks, ads, pauses, and tab throttling spikes.
+ * Supports incremental delta consumption (e.g. every 30s) without double-counting.
  */
 export class PlaybackClock {
   private lastTime: number | null = null;
   private totalSeconds = 0;
+  private flushedSeconds = 0;
 
   get watchedSeconds(): number {
     return Math.round(this.totalSeconds * 100) / 100;
+  }
+
+  get pendingDeltaSeconds(): number {
+    return Math.max(0, Math.round((this.totalSeconds - this.flushedSeconds) * 100) / 100);
   }
 
   tick(currentTime: number, isPlaying: boolean): void {
@@ -232,8 +240,22 @@ export class PlaybackClock {
     this.lastTime = currentTime;
   }
 
+  consumeDelta(): number {
+    const delta = this.pendingDeltaSeconds;
+    if (delta > 0) {
+      this.flushedSeconds = this.totalSeconds;
+    }
+    return delta;
+  }
+
+  restoreDelta(seconds: number): void {
+    if (!Number.isFinite(seconds) || seconds <= 0) return;
+    this.flushedSeconds = Math.max(0, this.flushedSeconds - seconds);
+  }
+
   reset(): void {
     this.lastTime = null;
     this.totalSeconds = 0;
+    this.flushedSeconds = 0;
   }
 }

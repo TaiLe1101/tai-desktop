@@ -1,13 +1,18 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } from 'electron';
 import { setDefaultResultOrder } from 'node:dns';
 import { join } from 'node:path';
+import { AuthService } from './auth-service';
 import { SettingsStore } from './settings';
 import { VoiceoverService } from './voiceover';
 import { DubbingClient } from './dubbing-client';
 import { ensureAudioDirectory } from './storage';
 import { YoutubeSession } from './youtube';
 import { AppUpdater } from './updater';
+import { DubbingAuthOrQuotaError, encodeBlockError } from '../shared/saas';
 import type {
+  AuthLoginInput,
+  AuthRegisterInput,
+  CreateUpgradeRequestInput,
   DubbingPreferences,
   OverlayStatePayload,
   SettingsInput,
@@ -26,6 +31,7 @@ app.setName('TAI Desktop');
 let window: BrowserWindow;
 let youtube: YoutubeSession;
 let service: VoiceoverService;
+let authService: AuthService;
 let dubbingClient: DubbingClient;
 let updater: AppUpdater;
 let quitting = false;
@@ -49,7 +55,9 @@ else {
     await settings.load();
     await ensureAudioDirectory(settings.getAudioDirectory());
     service = new VoiceoverService(settings.getAudioDirectory(), () => settings.worker());
-    dubbingClient = new DubbingClient(() => settings.server(), () => settings.worker());
+    authService = new AuthService(settings);
+    dubbingClient = new DubbingClient(() => settings.server(), () => settings.worker(), authService);
+
     const currentVersion = app.getVersion() || (typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '');
     const iconImage = nativeImage.createFromPath(join(__dirname, '../../build/icon.png'));
     window = new BrowserWindow({
@@ -72,6 +80,7 @@ else {
     window.on('close', event => { if (!quitting) { event.preventDefault(); app.quit(); } });
     window.webContents.on('will-navigate', e => e.preventDefault());
 
+    authService.setWindow(window);
     youtube = new YoutubeSession(
       window,
       service,
@@ -91,8 +100,6 @@ else {
     }
 
     handle('tai:navigate', (url: string) => youtube.navigate(url));
-    // Smooth ducking now controls <video>.volume directly via tai:control-video;
-    // keep tai:voice non-destructive (never hard-mute WebContents when false).
     handle('tai:voice', (_enabled: boolean) => {
       if (!youtube.view.webContents.isDestroyed()) {
         youtube.view.webContents.setAudioMuted(false);
@@ -140,7 +147,16 @@ else {
     handle('tai:start-dubbing', (videoId: string, options?: StartDubbingOptions) => youtube.startDubbing(videoId, options));
     handle('tai:stop-dubbing', () => youtube.stopDubbing());
     handle('tai:set-transcript-open', (open: boolean) => youtube.setTranscriptOpen(open === true));
-    handle('tai:synthesize-tts', (req: TtsSynthesizeRequest) => dubbingClient.synthesizeTts(req));
+    handle('tai:synthesize-tts', async (req: TtsSynthesizeRequest) => {
+      try {
+        return await dubbingClient.synthesizeTts(req);
+      } catch (err) {
+        if (err instanceof DubbingAuthOrQuotaError) {
+          throw new Error(encodeBlockError(err.code, err.message));
+        }
+        throw err;
+      }
+    });
     handle('tai:control-video', (cmd: VideoControlCommand) => youtube.controlVideo(cmd));
     handle('tai:update-overlay', (payload: OverlayStatePayload) => youtube.updateOverlay(payload));
     handle('tai:get-overlay-anchor', () => youtube.getOverlayAnchor());
@@ -148,6 +164,20 @@ else {
     handle('tai:save-dubbing-prefs', (prefs: Partial<DubbingPreferences>) => settings.saveDubbingPrefs(prefs));
     handle('tai:dubbing-health', () => dubbingClient.health());
 
+    // SaaS Auth & Plans IPC handlers
+    handle('tai:auth-state', () => authService.getState());
+    handle('tai:auth-login', (input: AuthLoginInput) => authService.login(input));
+    handle('tai:auth-register', (input: AuthRegisterInput) => authService.register(input));
+    handle('tai:auth-logout', async () => {
+      youtube.reset();
+      await authService.logout();
+    });
+    handle('tai:saas-entitlement', () => authService.getEntitlement());
+    handle('tai:saas-plans', () => authService.listPublicPlans());
+    handle('tai:saas-upgrade-requests', () => authService.listUpgradeRequests());
+    handle('tai:saas-create-upgrade-request', (input: CreateUpgradeRequestInput) => authService.createUpgradeRequest(input));
+
+    await authService.init().catch(() => {});
     setTimeout(() => { void updater.checkForUpdates(); }, 5000);
     if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) await window.loadURL(process.env.ELECTRON_RENDERER_URL);
     else await window.loadFile(join(__dirname, '../renderer/index.html'));

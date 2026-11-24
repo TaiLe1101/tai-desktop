@@ -5,12 +5,14 @@ import ClosedCaption from '@mui/icons-material/ClosedCaption';
 import FolderOpen from '@mui/icons-material/FolderOpen';
 import GraphicEq from '@mui/icons-material/GraphicEq';
 import Home from '@mui/icons-material/Home';
+import Logout from '@mui/icons-material/Logout';
 import Refresh from '@mui/icons-material/Refresh';
 import SettingsIcon from '@mui/icons-material/Settings';
 import StopCircle from '@mui/icons-material/StopCircle';
 import SystemUpdate from '@mui/icons-material/SystemUpdate';
 import Translate from '@mui/icons-material/Translate';
 import Tune from '@mui/icons-material/Tune';
+import WorkspacePremium from '@mui/icons-material/WorkspacePremium';
 import YouTube from '@mui/icons-material/YouTube';
 import {
   Alert,
@@ -45,16 +47,24 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   sourceLanguages,
+  type AuthState,
   type DesktopApi,
+  type DubbingBlockCode,
   type DubbingPreferences,
   type DubbingRuntimeStatus,
   type OriginalAudioMode,
+  type QuotaDto,
   type SettingsInput,
   type SourceLanguage,
   type SubtitleDisplayMode,
   type UpdateState,
   type VideoSession
 } from '../shared/types';
+import {
+  computeQuotaPercent,
+  formatDubbingBlockMessage,
+  formatQuotaLabel
+} from '../shared/saas';
 import {
   DEFAULT_DUBBING_PREFERENCES,
   SPEECH_RATE_OPTIONS,
@@ -63,6 +73,8 @@ import {
   getVoicesForLang
 } from '../shared/voices';
 import logoUrl from './assets/logo.png';
+import { AuthScreen } from './components/AuthScreen';
+import { UpgradeModal } from './components/UpgradeModal';
 import { VoicePlayer } from './player';
 import './style.css';
 
@@ -148,6 +160,11 @@ function App() {
   const duckDebounce = useRef<number | null>(null);
   const dubVolDebounce = useRef<number | null>(null);
 
+  const [authLoaded, setAuthLoaded] = useState(false);
+  const [authState, setAuthState] = useState<AuthState>({ authenticated: false, user: null, entitlement: null });
+  const [upgradeOpen, setUpgradeOpen] = useState(false);
+  const [blockAlert, setBlockAlert] = useState<{ code: DubbingBlockCode; message: string } | null>(null);
+
   const [form, setForm] = useState<SettingsInput>({ serverUrl: '', workerUrl: '', targetLang: 'vi', launchAtLogin: false });
   const [appVersion, setAppVersion] = useState<string>(() => (typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : ''));
   const [updateState, setUpdateState] = useState<UpdateState>({ phase: 'idle' });
@@ -170,12 +187,30 @@ function App() {
     toastTimer.current = window.setTimeout(() => setToast(''), TOAST_AUTO_HIDE_MS);
   };
 
+  const applyLiveQuota = (quota: QuotaDto) => {
+    setAuthState(prev => {
+      if (!prev.entitlement) return prev;
+      return {
+        ...prev,
+        entitlement: {
+          ...prev.entitlement,
+          quota
+        }
+      };
+    });
+  };
+
   const player = useRef<VoicePlayer | null>(null);
   if (!player.current) {
     player.current = new VoicePlayer({
       onStatusChange: status => setRuntimeStatus(status),
       onToast: msg => showToast(msg),
-      onFirstAudioStart: () => setControlsOpen(false)
+      onFirstAudioStart: () => setControlsOpen(false),
+      onQuotaUpdate: quota => applyLiveQuota(quota),
+      onBlocked: (code, message) => {
+        setBlockAlert({ code, message });
+        setError('');
+      }
     });
   }
 
@@ -245,6 +280,21 @@ function App() {
       setCache((await window.tai.status()).cachePath);
       const liveVersion = await window.tai.appVersion().catch(() => '');
       if (liveVersion) setAppVersion(liveVersion);
+      const initialAuth = await window.tai.authState().catch(
+        (): AuthState => ({ authenticated: false, user: null, entitlement: null })
+      );
+      setAuthState(initialAuth);
+      setAuthLoaded(true);
+    });
+
+    const unsubAuth = window.tai.onAuthState(nextAuth => {
+      setAuthState(nextAuth);
+      setAuthLoaded(true);
+      if (!nextAuth.authenticated) {
+        player.current?.stop();
+        setUpgradeOpen(false);
+        setBlockAlert(null);
+      }
     });
 
     const unsubUpdate = window.tai.onUpdateStatus(state => {
@@ -283,6 +333,7 @@ function App() {
     return () => {
       dead = true;
       clearInterval(timer);
+      unsubAuth();
       unsubUpdate();
       player.current?.dispose();
     };
@@ -306,8 +357,23 @@ function App() {
   }, [session?.videoId, session?.detectedSourceLanguage, session?.phase]);
 
   useEffect(() => {
-    if (screen !== 'youtube') {
-      player.current?.stop();
+    if (session?.blockCode) {
+      setBlockAlert({
+        code: session.blockCode,
+        message: session.error || formatDubbingBlockMessage(session.blockCode)
+      });
+    } else if (session?.dubbingActive && session.phase === 'PLAYING') {
+      setBlockAlert(null);
+    }
+  }, [session?.blockCode, session?.error, session?.dubbingActive, session?.phase]);
+
+  const modalCoveringView = upgradeOpen || showUpdateDialog;
+
+  useEffect(() => {
+    if (!authState.authenticated || screen !== 'youtube' || modalCoveringView) {
+      if (!authState.authenticated || screen !== 'youtube') {
+        player.current?.stop();
+      }
       void window.tai.bounds(null);
       return;
     }
@@ -326,7 +392,7 @@ function App() {
       window.removeEventListener('resize', update);
       void window.tai.bounds(null);
     };
-  }, [screen]);
+  }, [screen, authState.authenticated, modalCoveringView]);
 
   // Auto-scroll active transcript cue with 5,000ms manual-scroll pause
   const activeCueId = useMemo(() => {
@@ -380,10 +446,54 @@ function App() {
 
   const isDubbingRunning = Boolean(session?.dubbingActive);
   const currentVersion = updateState.currentVersion || appVersion;
+  const userDisplayName = authState.user
+    ? (`${authState.user.lastName || ''} ${authState.user.firstName || ''}`.trim() || authState.user.username)
+    : '';
+  const entitlement = authState.entitlement;
+  const quota = entitlement?.quota ?? null;
+  const quotaPct = computeQuotaPercent(quota);
+  const quotaLabel = formatQuotaLabel(quota);
 
   useEffect(() => {
     document.title = currentVersion ? `TAI Desktop v${currentVersion}` : 'TAI Desktop';
   }, [currentVersion]);
+
+  const handleLogout = async () => {
+    player.current?.stop();
+    await run(() => window.tai.authLogout());
+    setAuthState({ authenticated: false, user: null, entitlement: null });
+    setScreen('home');
+    setOpened(false);
+    setBlockAlert(null);
+  };
+
+  if (!authLoaded) {
+    return (
+      <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', bgcolor: '#0b1018' }}>
+        <Stack sx={{ alignItems: 'center', gap: 1.5 }}>
+          <Box component="img" src={logoUrl} alt="TAI Desktop" sx={{ width: 64, height: 64, borderRadius: 3 }} />
+          <Typography variant="body2" color="text.secondary">Đang khởi tạo phiên đăng nhập…</Typography>
+        </Stack>
+      </Box>
+    );
+  }
+
+  if (!authState.authenticated) {
+    return (
+      <AuthScreen
+        currentVersion={currentVersion}
+        initialNotice={
+          authState.reason === 'SESSION_EXPIRED' || authState.reason === 'AUTH_REQUIRED'
+            ? 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại để tiếp tục.'
+            : undefined
+        }
+        onAuthenticated={next => {
+          setAuthState(next);
+          setBlockAlert(null);
+        }}
+      />
+    );
+  }
 
   return (
     <Box sx={{ height: '100%', display: 'flex' }}>
@@ -409,10 +519,92 @@ function App() {
         <IconButton aria-label="YouTube" onClick={() => void openYoutube()} color={screen === 'youtube' ? 'primary' : 'default'}><YouTube /></IconButton>
         <Box sx={{ flex: 1 }} />
         <IconButton aria-label="Cấu hình" onClick={() => setScreen('settings')} color={screen === 'settings' ? 'primary' : 'default'}><SettingsIcon /></IconButton>
+        <IconButton aria-label="Đăng xuất" title="Đăng xuất" onClick={() => void handleLogout()}><Logout fontSize="small" /></IconButton>
         <Typography variant="caption" color="text.secondary">{currentVersion ? `v${currentVersion}` : ''}</Typography>
       </Stack>
 
       <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', p: screen === 'youtube' ? 1 : 3, gap: 1.5 }}>
+        {/* Authenticated Top Account & Quota Strip */}
+        <Paper
+          variant="outlined"
+          sx={{
+            px: 1.5,
+            py: 0.9,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1.5,
+            flexWrap: 'wrap',
+            bgcolor: 'rgba(20, 28, 40, 0.9)',
+            borderColor: '#263242'
+          }}
+        >
+          <Stack direction="row" sx={{ alignItems: 'center', gap: 1, minWidth: 0 }}>
+            <Typography variant="body2" sx={{ fontWeight: 700 }} noWrap>{userDisplayName}</Typography>
+            {entitlement?.tenant?.name && (
+              <Typography variant="caption" color="text.secondary" noWrap>· {entitlement.tenant.name}</Typography>
+            )}
+            <Chip
+              size="small"
+              label={entitlement?.plan?.name || 'Chưa có gói'}
+              color={entitlement?.plan?.priceMonthly ? 'primary' : 'default'}
+              variant="outlined"
+              sx={{ height: 22, fontWeight: 600 }}
+            />
+          </Stack>
+
+          <Stack sx={{ flex: 1, minWidth: 160, maxWidth: 320, gap: 0.4 }}>
+            <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <Typography variant="caption" color="text.secondary">Hạn mức tháng này</Typography>
+              <Typography variant="caption" sx={{ fontWeight: 600, color: quota?.canDub === false ? 'error.main' : 'text.primary' }}>
+                {quotaLabel}
+              </Typography>
+            </Stack>
+            <LinearProgress
+              variant="determinate"
+              value={quota?.isUnlimited ? 0 : quotaPct}
+              color={quotaPct >= 90 || quota?.canDub === false ? 'error' : quotaPct >= 75 ? 'warning' : 'primary'}
+              sx={{ height: 5, borderRadius: 3 }}
+            />
+          </Stack>
+
+          <Box sx={{ flex: 1 }} />
+
+          <Stack direction="row" sx={{ gap: 1, alignItems: 'center' }}>
+            <Button
+              size="small"
+              variant="contained"
+              startIcon={<WorkspacePremium fontSize="small" />}
+              onClick={() => setUpgradeOpen(true)}
+            >
+              Nâng cấp
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              color="inherit"
+              startIcon={<Logout fontSize="small" />}
+              onClick={() => void handleLogout()}
+            >
+              Đăng xuất
+            </Button>
+          </Stack>
+        </Paper>
+
+        {blockAlert && (
+          <Alert
+            severity="error"
+            onClose={() => setBlockAlert(null)}
+            action={
+              blockAlert.code !== 'AUTH_REQUIRED' ? (
+                <Button color="inherit" size="small" variant="outlined" onClick={() => setUpgradeOpen(true)}>
+                  Nâng cấp gói
+                </Button>
+              ) : undefined
+            }
+          >
+            {blockAlert.message}
+          </Alert>
+        )}
         {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
         {toast && toast !== error && <Alert severity="warning" onClose={() => setToast('')}>{toast}</Alert>}
         {screen === 'youtube' && session?.navigationError && <Alert severity="warning">{session.navigationError}</Alert>}
@@ -788,6 +980,56 @@ function App() {
                 )}
               </Box>
             </Stack>
+
+            <Paper variant="outlined" sx={{ p: 3, mb: 3 }}>
+              <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1.5, mb: 2 }}>
+                <Box>
+                  <Typography sx={{ fontWeight: 700 }}>Tài khoản &amp; Gói dịch vụ</Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {userDisplayName} ({authState.user?.email || authState.user?.username})
+                    {entitlement?.tenant?.name ? ` · ${entitlement.tenant.name}` : ''}
+                  </Typography>
+                </Box>
+                <Chip
+                  label={entitlement?.plan?.name || 'Chưa có gói'}
+                  color={entitlement?.plan?.priceMonthly ? 'primary' : 'default'}
+                  variant="outlined"
+                />
+              </Stack>
+              <Stack sx={{ gap: 1, mb: 2 }}>
+                <Stack direction="row" sx={{ justifyContent: 'space-between' }}>
+                  <Typography variant="body2" color="text.secondary">Hạn mức lồng tiếng ({quota?.period || 'tháng này'})</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 600 }}>{quotaLabel}</Typography>
+                </Stack>
+                <LinearProgress
+                  variant="determinate"
+                  value={quota?.isUnlimited ? 0 : quotaPct}
+                  color={quotaPct >= 90 || quota?.canDub === false ? 'error' : 'primary'}
+                  sx={{ height: 6, borderRadius: 3 }}
+                />
+                {entitlement?.subscription?.expiresAt && (
+                  <Typography variant="caption" color="text.secondary">
+                    Hết hạn: {new Date(entitlement.subscription.expiresAt).toLocaleDateString('vi-VN')}
+                  </Typography>
+                )}
+              </Stack>
+              <Stack direction="row" sx={{ gap: 1.5, flexWrap: 'wrap' }}>
+                <Button variant="contained" startIcon={<WorkspacePremium />} onClick={() => setUpgradeOpen(true)}>
+                  Nâng cấp gói
+                </Button>
+                <Button
+                  variant="outlined"
+                  startIcon={<Refresh />}
+                  onClick={() => void run(async () => { await window.tai.refreshEntitlement(); })}
+                >
+                  Làm mới hạn mức
+                </Button>
+                <Button variant="outlined" color="inherit" startIcon={<Logout />} onClick={() => void handleLogout()}>
+                  Đăng xuất
+                </Button>
+              </Stack>
+            </Paper>
+
             <Paper
               component="form"
               variant="outlined"
@@ -925,6 +1167,13 @@ function App() {
             </Button>
           </DialogActions>
         </Dialog>
+
+        <UpgradeModal
+          open={upgradeOpen}
+          entitlement={entitlement}
+          onClose={() => setUpgradeOpen(false)}
+          onSubmitted={() => void window.tai.refreshEntitlement().catch(() => {})}
+        />
       </Box>
     </Box>
   );

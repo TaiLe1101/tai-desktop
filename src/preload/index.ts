@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { DesktopApi, UpdateState } from '../shared/types';
+import type { AuthState, DesktopApi, UpdateState } from '../shared/types';
 
 const api: DesktopApi = {
   voice: enabled => ipcRenderer.invoke('tai:voice', enabled),
@@ -35,7 +35,21 @@ const api: DesktopApi = {
   getOverlayAnchor: () => ipcRenderer.invoke('tai:get-overlay-anchor'),
   reportSessions: sessions => ipcRenderer.invoke('tai:report-sessions', sessions),
   saveDubbingPrefs: prefs => ipcRenderer.invoke('tai:save-dubbing-prefs', prefs),
-  dubbingHealth: () => ipcRenderer.invoke('tai:dubbing-health')
+  dubbingHealth: () => ipcRenderer.invoke('tai:dubbing-health'),
+  // SaaS Auth & Plans APIs
+  authState: () => ipcRenderer.invoke('tai:auth-state'),
+  authLogin: input => ipcRenderer.invoke('tai:auth-login', input),
+  authRegister: input => ipcRenderer.invoke('tai:auth-register', input),
+  authLogout: () => ipcRenderer.invoke('tai:auth-logout'),
+  refreshEntitlement: () => ipcRenderer.invoke('tai:saas-entitlement'),
+  listPublicPlans: () => ipcRenderer.invoke('tai:saas-plans'),
+  listUpgradeRequests: () => ipcRenderer.invoke('tai:saas-upgrade-requests'),
+  createUpgradeRequest: input => ipcRenderer.invoke('tai:saas-create-upgrade-request', input),
+  onAuthState: listener => {
+    const handler = (_event: unknown, state: AuthState) => listener(state);
+    ipcRenderer.on('tai:auth-state-changed', handler);
+    return () => { ipcRenderer.removeListener('tai:auth-state-changed', handler); };
+  }
 };
 
 contextBridge.exposeInMainWorld('tai', api);

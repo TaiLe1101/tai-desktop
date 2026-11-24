@@ -85,6 +85,134 @@ export interface TelemetrySession {
   endedAt?: number;
 }
 
+// === Canonical TAI SaaS DTOs ===
+export interface PlanDto {
+  id: number;
+  code: string;
+  name: string;
+  description: string | null;
+  badge: string | null;
+  priceMonthly: number;
+  priceYearly: number;
+  currency: string;
+  monthlyMinutesLimit: number | null;
+  maxSeats: number;
+  features: string[];
+  isPublic: boolean;
+  isDefault: boolean;
+  isHighlighted: boolean;
+  sortOrder: number;
+  isActive: boolean;
+}
+
+export interface TenantDto {
+  id: number;
+  code: string;
+  name: string;
+  type: 'PERSONAL' | 'ORGANIZATION';
+  status: 'ACTIVE' | 'SUSPENDED';
+  contactEmail: string | null;
+  notes: string | null;
+  createdAt: string;
+}
+
+export interface SubscriptionDto {
+  id: number;
+  tenantId: number;
+  planId: number;
+  status: 'ACTIVE' | 'EXPIRED' | 'CANCELED' | 'PENDING';
+  billingCycle: 'MONTHLY' | 'YEARLY' | 'LIFETIME';
+  startsAt: string;
+  expiresAt: string | null;
+  monthlyMinutesLimitOverride: number | null;
+  note: string | null;
+  plan: PlanDto;
+}
+
+export type QuotaBlockReason =
+  | 'TENANT_SUSPENDED'
+  | 'SUBSCRIPTION_EXPIRED'
+  | 'QUOTA_EXCEEDED'
+  | 'NO_SUBSCRIPTION';
+
+export type DubbingBlockCode = 'AUTH_REQUIRED' | QuotaBlockReason;
+
+export interface QuotaDto {
+  period: string;
+  usedSeconds: number;
+  usedMinutes: number;
+  limitMinutes: number | null;
+  remainingMinutes: number | null;
+  isUnlimited: boolean;
+  canDub: boolean;
+  blockReason: QuotaBlockReason | null;
+}
+
+export interface EntitlementDto {
+  tenant: TenantDto;
+  memberRole: 'OWNER' | 'ADMIN' | 'MEMBER';
+  subscription: SubscriptionDto | null;
+  plan: PlanDto | null;
+  quota: QuotaDto;
+}
+
+export interface UserSummary {
+  id: number;
+  username: string;
+  email: string | null;
+  firstName: string;
+  lastName: string;
+  isRoot?: boolean;
+}
+
+export interface UpgradeRequestDto {
+  id: number;
+  tenantId: number;
+  userId: number;
+  requestedPlanId: number;
+  billingCycle: 'MONTHLY' | 'YEARLY';
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  contactNote: string | null;
+  adminNote: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+  tenant?: TenantDto;
+  requestedPlan?: PlanDto;
+  user?: UserSummary;
+}
+
+export interface AuthState {
+  authenticated: boolean;
+  user: UserSummary | null;
+  entitlement: EntitlementDto | null;
+  reason?: string;
+}
+
+export interface AuthLoginInput {
+  username: string;
+  password: string;
+}
+
+export interface AuthRegisterInput {
+  email: string;
+  password: string;
+  firstName: string;
+  lastName?: string;
+  username?: string;
+  tenantName?: string;
+}
+
+export interface CreateUpgradeRequestInput {
+  planId: number;
+  billingCycle?: 'MONTHLY' | 'YEARLY';
+  contactNote?: string;
+}
+
+export interface ReportSessionsResponse {
+  accepted: number;
+  quota?: QuotaDto;
+}
+
 // Language of the caption text received from YouTube Auto-translate.
 export type SourceLanguage = string;
 
@@ -215,9 +343,19 @@ export interface DesktopApi {
   controlVideo(cmd: VideoControlCommand): Promise<void>;
   updateOverlay(payload: OverlayStatePayload): Promise<void>;
   getOverlayAnchor(): Promise<OverlayAnchor | null>;
-  reportSessions(sessions: TelemetrySession[]): Promise<{ accepted: number }>;
+  reportSessions(sessions: TelemetrySession[]): Promise<ReportSessionsResponse>;
   saveDubbingPrefs(prefs: Partial<DubbingPreferences>): Promise<void>;
   dubbingHealth(): Promise<DubbingHealthResult>;
+  // SaaS Auth & Plans APIs
+  authState(): Promise<AuthState>;
+  authLogin(input: AuthLoginInput): Promise<AuthState>;
+  authRegister(input: AuthRegisterInput): Promise<AuthState>;
+  authLogout(): Promise<void>;
+  refreshEntitlement(): Promise<EntitlementDto | null>;
+  listPublicPlans(): Promise<PlanDto[]>;
+  listUpgradeRequests(): Promise<UpgradeRequestDto[]>;
+  createUpgradeRequest(input: CreateUpgradeRequestInput): Promise<UpgradeRequestDto>;
+  onAuthState(listener: (state: AuthState) => void): () => void;
 }
 
 export interface VoiceChunk extends SubtitleSegment {
@@ -264,4 +402,7 @@ export interface VideoSession {
   autoTranslatePausedUntil?: number;
   dubbingActive?: boolean;
   overlayAnchor?: OverlayAnchor;
+  // SaaS block status
+  blockCode?: DubbingBlockCode;
+  blockQuota?: QuotaDto;
 }
