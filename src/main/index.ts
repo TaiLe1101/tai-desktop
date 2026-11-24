@@ -36,6 +36,7 @@ let authService: AuthService;
 let dubbingClient: DubbingClient;
 let updater: AppUpdater;
 let quitting = false;
+let allowClose = false;
 const settings = new SettingsStore();
 
 if (!app.requestSingleInstanceLock()) app.quit();
@@ -66,6 +67,8 @@ else {
       height: 920,
       minWidth: 1000,
       minHeight: 680,
+      frame: false,
+      show: false,
       title: currentVersion ? `TAI Desktop v${currentVersion}` : 'TAI Desktop',
       ...(iconImage.isEmpty() ? {} : { icon: iconImage }),
       backgroundColor: '#0b1018',
@@ -78,7 +81,24 @@ else {
       }
     });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-    window.on('close', event => { if (!quitting) { event.preventDefault(); app.quit(); } });
+    window.once('ready-to-show', () => {
+      window.maximize();
+      window.show();
+    });
+    const emitWindowState = () => {
+      if (!window.isDestroyed()) {
+        window.webContents.send('tai:window-state-changed', { isMaximized: window.isMaximized() });
+      }
+    };
+    window.on('maximize', emitWindowState);
+    window.on('unmaximize', emitWindowState);
+    window.on('close', event => {
+      if (quitting || allowClose) return;
+      event.preventDefault();
+      if (!window.isDestroyed()) {
+        window.webContents.send('tai:request-close-confirm');
+      }
+    });
     window.webContents.on('will-navigate', e => e.preventDefault());
 
     authService.setWindow(window);
@@ -183,6 +203,18 @@ else {
     handle('tai:saas-payment-orders', () => authService.listPaymentOrders());
     handle('tai:saas-payment-order-status', (paymentCode: string) => authService.getPaymentOrderStatus(paymentCode));
     handle('tai:saas-cancel-payment-order', (paymentCode: string) => authService.cancelPaymentOrder(paymentCode));
+    // Custom Frameless Window Controls
+    handle('tai:window-minimize', () => { window.minimize(); });
+    handle('tai:window-toggle-maximize', () => {
+      if (window.isMaximized()) window.unmaximize();
+      else window.maximize();
+      return window.isMaximized();
+    });
+    handle('tai:window-is-maximized', () => window.isMaximized());
+    handle('tai:window-confirm-close', () => {
+      allowClose = true;
+      app.quit();
+    });
 
     await authService.init().catch(() => {});
     setTimeout(() => { void updater.checkForUpdates(); }, 5000);

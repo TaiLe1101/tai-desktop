@@ -134,6 +134,48 @@ export function formatVnd(amount: number, currency = 'VND'): string {
 }
 
 /**
+ * Normalizes Electron IPC / network / HTTP gateway errors into a clean,
+ * concise Vietnamese message suitable for end-user UI alerts.
+ */
+export function formatUiError(err: unknown, fallback = 'Đã xảy ra lỗi. Vui lòng thử lại.'): string {
+  const raw = err instanceof Error ? err.message : (typeof err === 'string' ? err : '');
+  let msg = raw.trim();
+  if (!msg) return fallback;
+
+  // Strip Electron IPC invoke wrapper & leading Error type prefixes
+  msg = msg.replace(/^Error invoking remote method '[^']+':\s*/i, '').trim();
+  while (/^(?:Error|TypeError|RangeError|ApiError|DubbingAuthOrQuotaError):\s*/i.test(msg)) {
+    msg = msg.replace(/^(?:Error|TypeError|RangeError|ApiError|DubbingAuthOrQuotaError):\s*/i, '').trim();
+  }
+
+  // Strip encoded internal block tag if present
+  msg = msg.replace(/^\[TAI_BLOCK:[A-Z_]+\]\s*/, '').trim();
+
+  // Map raw network / abort / gateway strings to friendly Vietnamese
+  if (
+    /^(?:fetch failed|failed to fetch|networkerror|load failed|aborted|the operation was aborted)/i.test(msg)
+    || /net::ERR_|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|EAI_AGAIN/i.test(msg)
+    || /\b(502|503|504)\b.*(?:bad gateway|service unavailable|gateway timeout)/i.test(msg)
+  ) {
+    return 'Không thể kết nối đến máy chủ';
+  }
+
+  // Strip trailing "(HTTP 502)." or "(HTTP 500)" noise
+  const hadHttpSuffix = /\s*\(HTTP\s+\d{3}\)\s*\.?$/i.test(msg);
+  msg = msg.replace(/\s*\(HTTP\s+\d{3}\)\s*\.?$/i, '').trim();
+  if (hadHttpSuffix && msg.endsWith('.')) {
+    msg = msg.slice(0, -1).trim();
+  }
+
+  // Strip bare internal "Máy chủ trả lỗi HTTP 502." / "HTTP 502" style strings
+  if (/^(?:Máy chủ trả lỗi|Server .* trả|TTS .* trả)?\s*HTTP\s+\d{3}\b/i.test(msg)) {
+    return fallback;
+  }
+
+  return msg || fallback;
+}
+
+/**
  * Unwraps `/api/v1/auth/me` response data supporting both nested
  * `{ profile: UserSummary, entitlement }` (tai-be canonical shape) and flat `UserSummary`.
  */

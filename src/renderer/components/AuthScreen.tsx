@@ -1,6 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
-  Alert,
   Box,
   Button,
   CircularProgress,
@@ -11,8 +10,10 @@ import {
   TextField,
   Typography
 } from '@mui/material';
+import { formatUiError } from '../../shared/saas';
 import type { AuthState } from '../../shared/types';
 import logoUrl from '../assets/logo.png';
+import { useToast } from './ToastProvider';
 
 interface AuthScreenProps {
   currentVersion: string;
@@ -21,9 +22,9 @@ interface AuthScreenProps {
 }
 
 export function AuthScreen({ currentVersion, initialNotice, onAuthenticated }: AuthScreenProps) {
+  const { notify } = useToast();
   const [tab, setTab] = useState<'login' | 'register'>('login');
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
 
   // Login fields
   const [username, setUsername] = useState('');
@@ -36,15 +37,24 @@ export function AuthScreen({ currentVersion, initialNotice, onAuthenticated }: A
   const [regPassword, setRegPassword] = useState('');
   const [tenantName, setTenantName] = useState('');
 
+  useEffect(() => {
+    if (initialNotice) {
+      notify({
+        severity: 'info',
+        message: initialNotice,
+        dedupeKey: `auth-initial-notice:${initialNotice}`
+      });
+    }
+  }, [initialNotice, notify]);
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError('');
     setSubmitting(true);
     try {
       const state = await window.tai.authLogin({ username: username.trim(), password });
       onAuthenticated(state);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      notify({ severity: 'error', message: formatUiError(err, 'Đăng nhập thất bại') });
     } finally {
       setSubmitting(false);
     }
@@ -52,9 +62,8 @@ export function AuthScreen({ currentVersion, initialNotice, onAuthenticated }: A
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError('');
     if (regPassword.length < 6) {
-      setError('Mật khẩu cần tối thiểu 6 ký tự.');
+      notify({ severity: 'warning', message: 'Mật khẩu cần tối thiểu 6 ký tự.' });
       return;
     }
     setSubmitting(true);
@@ -66,9 +75,10 @@ export function AuthScreen({ currentVersion, initialNotice, onAuthenticated }: A
         lastName: lastName.trim() || undefined,
         tenantName: tenantName.trim() || undefined
       });
+      notify({ severity: 'success', message: 'Tạo tài khoản thành công!' });
       onAuthenticated(state);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      notify({ severity: 'error', message: formatUiError(err, 'Đăng ký thất bại') });
     } finally {
       setSubmitting(false);
     }
@@ -122,20 +132,13 @@ export function AuthScreen({ currentVersion, initialNotice, onAuthenticated }: A
 
         <Tabs
           value={tab}
-          onChange={(_e, val) => { setTab(val); setError(''); }}
+          onChange={(_e, val) => setTab(val)}
           variant="fullWidth"
           sx={{ mb: 2.5, borderBottom: '1px solid #263242' }}
         >
           <Tab value="login" label="Đăng nhập" />
           <Tab value="register" label="Đăng ký mới" />
         </Tabs>
-
-        {initialNotice && !error && (
-          <Alert severity="info" sx={{ mb: 2 }}>{initialNotice}</Alert>
-        )}
-        {error && (
-          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>
-        )}
 
         {tab === 'login' ? (
           <Stack component="form" onSubmit={e => void handleLogin(e)} sx={{ gap: 2 }}>

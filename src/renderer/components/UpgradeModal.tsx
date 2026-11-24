@@ -4,7 +4,6 @@ import ContentCopy from '@mui/icons-material/ContentCopy';
 import QrCode2 from '@mui/icons-material/QrCode2';
 import WorkspacePremium from '@mui/icons-material/WorkspacePremium';
 import {
-  Alert,
   Box,
   Button,
   Chip,
@@ -24,7 +23,7 @@ import {
   Typography
 } from '@mui/material';
 import { useEffect, useRef, useState } from 'react';
-import { formatVnd } from '../../shared/saas';
+import { formatUiError, formatVnd } from '../../shared/saas';
 import type {
   EntitlementDto,
   PaymentConfigDto,
@@ -33,6 +32,7 @@ import type {
   PlanDto,
   UpgradeRequestDto
 } from '../../shared/types';
+import { useToast } from './ToastProvider';
 
 interface UpgradeModalProps {
   open: boolean;
@@ -65,6 +65,7 @@ function formatCountdown(msRemaining: number): string {
 }
 
 export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }: UpgradeModalProps) {
+  const { notify } = useToast();
   const [plans, setPlans] = useState<PlanDto[]>([]);
   const [requests, setRequests] = useState<UpgradeRequestDto[]>([]);
   const [orders, setOrders] = useState<PaymentOrderDto[]>([]);
@@ -84,8 +85,6 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
   const [submitting, setSubmitting] = useState(false);
   const [creatingOrder, setCreatingOrder] = useState(false);
   const [cancelingOrder, setCancelingOrder] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
   const [billingCycle, setBillingCycle] = useState<'MONTHLY' | 'YEARLY'>('MONTHLY');
   const [selectedPlanId, setSelectedPlanId] = useState<number | null>(null);
   const [contactNote, setContactNote] = useState('');
@@ -93,17 +92,17 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
   const pollInFlight = useRef(false);
   const paidHandledRef = useRef<string | null>(null);
 
-  const copyText = async (key: string, value: string) => {
+  const copyText = async (key: string, label: string, value: string) => {
     try {
       await navigator.clipboard.writeText(value);
       setCopiedKey(key);
+      notify({ severity: 'info', message: `Đã sao chép ${label.toLowerCase()}`, autoHideDuration: 2200, dedupeKey: `copy:${key}:${value}` });
       window.setTimeout(() => setCopiedKey(prev => (prev === key ? null : prev)), 1800);
     } catch {}
   };
 
   const loadData = async () => {
     setLoading(true);
-    setError('');
     try {
       const [planList, reqList, cfg, orderList] = await Promise.all([
         window.tai.listPublicPlans(),
@@ -123,7 +122,6 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
       setOrders(orderList);
       setPaymentTab(cfg.sepayEnabled ? 'vietqr' : 'manual');
 
-      // Resume an unexpired PENDING order if one exists
       const existingPending = orderList.find(
         o => o.status === 'PENDING' && new Date(o.expiresAt).getTime() > Date.now()
       );
@@ -140,7 +138,7 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
         if (defaultPick) setSelectedPlanId(prev => prev ?? defaultPick.id);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      notify({ severity: 'error', message: formatUiError(err, 'Không tải được thông tin gói dịch vụ') });
     } finally {
       setLoading(false);
     }
@@ -148,8 +146,6 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
 
   useEffect(() => {
     if (open) {
-      setSuccess('');
-      setError('');
       paidHandledRef.current = null;
       void loadData();
     } else {
@@ -169,15 +165,23 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
       const diff = Math.max(0, expiresMs - Date.now());
       setRemainingMs(diff);
       if (diff <= 0) {
-        setActiveOrder(prev => (prev && prev.paymentCode === activeOrder.paymentCode && prev.status === 'PENDING'
-          ? { ...prev, status: 'EXPIRED', qrUrl: null }
-          : prev));
+        setActiveOrder(prev => {
+          if (prev && prev.paymentCode === activeOrder.paymentCode && prev.status === 'PENDING') {
+            notify({
+              severity: 'warning',
+              message: 'Đơn thanh toán đã hết hạn. Vui lòng tạo đơn mới.',
+              dedupeKey: `order-expired:${activeOrder.paymentCode}`
+            });
+            return { ...prev, status: 'EXPIRED', qrUrl: null };
+          }
+          return prev;
+        });
       }
     };
     updateRemaining();
     const timer = window.setInterval(updateRemaining, 1000);
     return () => window.clearInterval(timer);
-  }, [open, activeOrder?.paymentCode, activeOrder?.status, activeOrder?.expiresAt]);
+  }, [open, activeOrder?.paymentCode, activeOrder?.status, activeOrder?.expiresAt, notify]);
 
   // 3-second payment status polling (pauses when document.hidden, stops on PAID/EXPIRED/CANCELED or close)
   useEffect(() => {
@@ -207,10 +211,26 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
 
           if (st.status === 'PAID' && paidHandledRef.current !== code) {
             paidHandledRef.current = code;
-            setSuccess('Thanh toán thành công — gói đã được kích hoạt!');
+            notify({
+              severity: 'success',
+              message: 'Thanh toán thành công — gói đã được kích hoạt!',
+              dedupeKey: `order-paid:${code}`
+            });
             await window.tai.refreshEntitlement().catch(() => null);
             onPaid?.();
             onSubmitted?.();
+          } else if (st.status === 'EXPIRED') {
+            notify({
+              severity: 'warning',
+              message: 'Đơn thanh toán đã hết hạn. Vui lòng tạo đơn mới.',
+              dedupeKey: `order-expired:${code}`
+            });
+          } else if (st.status === 'CANCELED') {
+            notify({
+              severity: 'info',
+              message: 'Đơn thanh toán đã được hủy.',
+              dedupeKey: `order-canceled:${code}`
+            });
           }
         }
       } catch {
@@ -230,7 +250,7 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [open, activeOrder?.paymentCode, activeOrder?.status]);
+  }, [open, activeOrder?.paymentCode, activeOrder?.status, notify]);
 
   const selectedPlan = plans.find(p => p.id === selectedPlanId) || null;
   const selectedPrice = selectedPlan
@@ -240,8 +260,6 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
 
   const handleCreateOrder = async () => {
     if (!selectedPlanId || !isPaidPlanSelected) return;
-    setError('');
-    setSuccess('');
     setCreatingOrder(true);
     try {
       const order = await window.tai.createPaymentOrder({
@@ -250,8 +268,9 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
       });
       setActiveOrder(order);
       setOrders(prev => [order, ...prev.filter(o => o.paymentCode !== order.paymentCode)]);
+      notify({ severity: 'info', message: `Đã tạo đơn thanh toán ${order.paymentCode}. Vui lòng quét mã QR.` });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      notify({ severity: 'error', message: formatUiError(err, 'Không thể tạo mã QR thanh toán') });
     } finally {
       setCreatingOrder(false);
     }
@@ -259,7 +278,6 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
 
   const handleCancelOrder = async () => {
     if (!activeOrder) return;
-    setError('');
     setCancelingOrder(true);
     try {
       if (activeOrder.status === 'PENDING') {
@@ -267,10 +285,11 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
         setOrders(prev => prev.map(o => (o.paymentCode === activeOrder.paymentCode
           ? { ...o, status: res.status, qrUrl: null }
           : o)));
+        notify({ severity: 'info', message: `Đã hủy đơn thanh toán ${activeOrder.paymentCode}.` });
       }
       setActiveOrder(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      notify({ severity: 'error', message: formatUiError(err, 'Không thể hủy đơn thanh toán') });
     } finally {
       setCancelingOrder(false);
     }
@@ -278,8 +297,6 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
 
   const handleManualSubmit = async () => {
     if (!selectedPlanId) return;
-    setError('');
-    setSuccess('');
     setSubmitting(true);
     try {
       const created = await window.tai.createUpgradeRequest({
@@ -289,10 +306,13 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
       });
       setRequests(prev => [created, ...prev]);
       setContactNote('');
-      setSuccess('Đã gửi yêu cầu nâng cấp thành công! Quản trị viên sẽ liên hệ và kích hoạt gói sớm nhất.');
+      notify({
+        severity: 'success',
+        message: 'Đã gửi yêu cầu nâng cấp thành công! Quản trị viên sẽ liên hệ và kích hoạt gói sớm nhất.'
+      });
       onSubmitted?.();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      notify({ severity: 'error', message: formatUiError(err, 'Không thể gửi yêu cầu nâng cấp') });
     } finally {
       setSubmitting(false);
     }
@@ -336,16 +356,12 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
             </ToggleButtonGroup>
           </Stack>
 
-          {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
-          {success && <Alert severity="success" onClose={() => setSuccess('')}>{success}</Alert>}
-
           {loading ? (
             <Box sx={{ display: 'grid', placeItems: 'center', py: 5 }}>
               <CircularProgress />
             </Box>
           ) : (
             <>
-              {/* Plan Cards (locked while a PENDING VietQR order is active) */}
               {(!activeOrder || activeOrder.status !== 'PENDING') && (
                 <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(3, 1fr)' }, gap: 2 }}>
                   {plans.map(plan => {
@@ -493,27 +509,26 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
 
                         {activeOrder.status === 'PAID' ? (
                           <Stack sx={{ gap: 1.5 }}>
-                            <Alert severity="success">
-                              Thanh toán thành công — gói đã được kích hoạt! Số tiền nhận: <strong>{formatVnd(activeOrder.paidAmount ?? activeOrder.amount, activeOrder.currency)}</strong>.
-                            </Alert>
+                            <Typography variant="body2" sx={{ color: 'success.main', fontWeight: 600 }}>
+                              Thanh toán thành công — gói đã được kích hoạt! Số tiền nhận: {formatVnd(activeOrder.paidAmount ?? activeOrder.amount, activeOrder.currency)}.
+                            </Typography>
                             <Stack direction="row" sx={{ justifyContent: 'flex-end' }}>
                               <Button variant="contained" onClick={onClose}>Hoàn tất</Button>
                             </Stack>
                           </Stack>
                         ) : activeOrder.status === 'EXPIRED' || activeOrder.status === 'CANCELED' ? (
                           <Stack sx={{ gap: 1.5 }}>
-                            <Alert severity="warning">
+                            <Typography variant="body2" color="text.secondary">
                               {activeOrder.status === 'EXPIRED'
                                 ? 'Đơn thanh toán đã hết hạn. Vui lòng không chuyển khoản theo mã cũ — hãy tạo đơn mới.'
                                 : 'Đơn thanh toán đã được hủy.'}
-                            </Alert>
+                            </Typography>
                             <Stack direction="row" sx={{ justifyContent: 'flex-end', gap: 1 }}>
                               <Button variant="outlined" onClick={() => setActiveOrder(null)}>Chọn gói khác</Button>
                             </Stack>
                           </Stack>
                         ) : (
                           <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '240px 1fr' }, gap: 2.5, alignItems: 'start' }}>
-                            {/* VietQR Image Box (hidden automatically if expired/canceled) */}
                             <Stack sx={{ alignItems: 'center', gap: 1 }}>
                               {showQrImage && activeOrder.qrUrl && (
                                 <Box
@@ -537,11 +552,10 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
                               </Typography>
                             </Stack>
 
-                            {/* Bank Transfer Details + 1-Click Copy */}
                             <Stack sx={{ gap: 1.2 }}>
-                              <Alert severity="warning" sx={{ py: 0.6 }}>
-                                <strong>Vui lòng giữ nguyên nội dung chuyển khoản và chuyển đúng số tiền</strong> để hệ thống tự động kích hoạt gói ngay lập tức.
-                              </Alert>
+                              <Typography variant="body2" sx={{ color: '#fbbf24', fontWeight: 700 }}>
+                                Vui lòng giữ nguyên nội dung chuyển khoản và chuyển đúng số tiền để hệ thống tự động kích hoạt gói ngay lập tức.
+                              </Typography>
 
                               {[
                                 { key: 'bank', label: 'Ngân hàng', value: activeOrder.bankCode, copyVal: activeOrder.bankCode },
@@ -580,7 +594,7 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
                                     size="small"
                                     variant="text"
                                     startIcon={copiedKey === row.key ? <Check fontSize="small" /> : <ContentCopy fontSize="small" />}
-                                    onClick={() => void copyText(row.key, row.copyVal)}
+                                    onClick={() => void copyText(row.key, row.label, row.copyVal)}
                                   >
                                     {copiedKey === row.key ? 'Đã chép' : 'Sao chép'}
                                   </Button>
@@ -603,7 +617,6 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
                       </Paper>
                     )}
 
-                    {/* Recent Payment Orders History */}
                     {orders.length > 0 && (
                       <Box>
                         <Divider sx={{ mb: 1.5 }} />
@@ -646,9 +659,9 @@ export function UpgradeModal({ open, entitlement, onClose, onSubmitted, onPaid }
                 {paymentTab === 'manual' && (
                   <Stack sx={{ gap: 2 }}>
                     {pendingRequest && (
-                      <Alert severity="info">
-                        Bạn đang có yêu cầu nâng cấp lên gói <strong>{pendingRequest.requestedPlan?.name || `#${pendingRequest.requestedPlanId}`}</strong> ({pendingRequest.billingCycle === 'YEARLY' ? 'Theo năm' : 'Theo tháng'}) — <strong>Đang chờ quản trị viên duyệt</strong>.
-                      </Alert>
+                      <Typography variant="body2" color="primary.main">
+                        Bạn đang có yêu cầu nâng cấp lên gói <strong>{pendingRequest.requestedPlan?.name || `#${pendingRequest.requestedPlanId}`}</strong> ({pendingRequest.billingCycle === 'YEARLY' ? 'Theo năm' : 'Theo tháng'}) — Đang chờ quản trị viên duyệt.
+                      </Typography>
                     )}
                     <TextField
                       label="Thông tin liên hệ / Ghi chú (SĐT, Zalo, nhu cầu sử dụng)"

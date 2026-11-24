@@ -39,9 +39,16 @@ export interface DubbingAuthProvider {
 
 export class SubtitleDownloadFailedError extends Error {
   readonly code = 'SUBTITLE_DOWNLOAD_FAILED';
-  constructor(message = 'Backend failed to download YouTube subtitle URL.') {
+  constructor(message = 'Không thể tải phụ đề YouTube. Đang thử lại.') {
     super(message);
     this.name = 'SubtitleDownloadFailedError';
+  }
+}
+
+class HttpStatusError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = 'HttpStatusError';
   }
 }
 
@@ -359,12 +366,12 @@ export class DubbingClient {
         if (res.status >= 500 || res.status === 404) {
           this.markServerUnavailable();
         } else {
-          const text = await res.text().catch(() => '');
-          throw new Error(`Server youtube-subtitles trả HTTP ${res.status}: ${text.slice(0, 160)}`);
+          const jsonErr = await res.json().catch(() => null) as { message?: string } | null;
+          throw new HttpStatusError(res.status, jsonErr?.message || 'Không thể xử lý phụ đề trên máy chủ.');
         }
       } catch (error) {
         if (error instanceof DubbingAuthOrQuotaError) throw error;
-        if (error instanceof Error && error.message.startsWith('Server youtube-subtitles trả HTTP 4')) {
+        if (error instanceof HttpStatusError && error.status >= 400 && error.status < 500) {
           throw error;
         }
         this.markServerUnavailable();
@@ -445,13 +452,16 @@ export class DubbingClient {
             };
           }
           if (res.status === 404 || res.status >= 500) {
-            lastErr = new Error(`Server segments HTTP ${res.status}`);
+            lastErr = new HttpStatusError(res.status, 'Không thể kết nối đến máy chủ');
           } else {
-            const text = await res.text().catch(() => '');
-            throw new Error(`Server segments HTTP ${res.status}: ${text.slice(0, 160)}`);
+            const jsonErr = await res.json().catch(() => null) as { message?: string } | null;
+            throw new HttpStatusError(res.status, jsonErr?.message || 'Không thể tải đoạn dịch từ máy chủ.');
           }
         } catch (err) {
           if (err instanceof DubbingAuthOrQuotaError || err instanceof SubtitleDownloadFailedError || isAbortError(err)) {
+            throw err;
+          }
+          if (err instanceof HttpStatusError && err.status >= 400 && err.status < 500 && err.status !== 404) {
             throw err;
           }
           lastErr = err;
@@ -528,8 +538,7 @@ export class DubbingClient {
     );
 
     if (!res.ok) {
-      const txt = await res.text().catch(() => '');
-      throw new Error(`Worker /translate-segment trả HTTP ${res.status}: ${txt.slice(0, 160)}`);
+      throw new HttpStatusError(res.status, 'Không thể dịch đoạn phụ đề lúc này.');
     }
 
     const data = await res.json() as {
@@ -586,7 +595,7 @@ export class DubbingClient {
         );
       } catch (err) {
         if (err instanceof DubbingAuthOrQuotaError || isAbortError(err)) throw err;
-        const isClient4xx = err instanceof Error && /HTTP 4(?!04\b)\d\d/.test(err.message);
+        const isClient4xx = err instanceof HttpStatusError && err.status >= 400 && err.status < 500 && err.status !== 404;
         if (!isClient4xx) {
           this.markServerUnavailable();
         }
@@ -613,7 +622,7 @@ export class DubbingClient {
       );
     } catch (err) {
       if (isAbortError(err)) throw err;
-      const isMissingEndpoint = err instanceof Error && /HTTP (404|405)\b/.test(err.message);
+      const isMissingEndpoint = err instanceof HttpStatusError && (err.status === 404 || err.status === 405);
       if (!isMissingEndpoint) throw err;
       return this.fetchTtsWithRetry(
         worker.workerUrl,
@@ -650,7 +659,7 @@ export class DubbingClient {
         );
 
         if (!res.ok) {
-          const err = new Error(`TTS /api/v1/dubbing/tts trả HTTP ${res.status}`);
+          const err = new HttpStatusError(res.status, res.status >= 500 ? 'Không thể kết nối đến máy chủ' : 'Không thể tạo giọng đọc lúc này.');
           if (res.status >= 500 && attempt < TTS_RETRIES) {
             lastError = err;
             await sleep(TTS_RETRY_DELAY_MS);
@@ -662,12 +671,12 @@ export class DubbingClient {
       } catch (err) {
         if (err instanceof DubbingAuthOrQuotaError || isAbortError(err)) throw err;
         lastError = err;
-        const isHttp4xx = err instanceof Error && /HTTP 4\d\d/.test(err.message);
+        const isHttp4xx = err instanceof HttpStatusError && err.status >= 400 && err.status < 500;
         if (isHttp4xx || attempt >= TTS_RETRIES) throw err;
         await sleep(TTS_RETRY_DELAY_MS);
       }
     }
-    throw lastError instanceof Error ? lastError : new Error('TTS synthesis failed');
+    throw lastError instanceof Error ? lastError : new Error('Không thể tạo giọng đọc lúc này.');
   }
 
   private async fetchTtsWithRetry(
@@ -695,7 +704,7 @@ export class DubbingClient {
         );
 
         if (!res.ok) {
-          const err = new Error(`TTS ${path} trả HTTP ${res.status}`);
+          const err = new HttpStatusError(res.status, 'Không thể tạo giọng đọc lúc này.');
           if (res.status >= 500 && attempt < TTS_RETRIES) {
             lastError = err;
             await sleep(TTS_RETRY_DELAY_MS);
@@ -707,12 +716,12 @@ export class DubbingClient {
       } catch (err) {
         lastError = err;
         if (isAbortError(err)) throw err;
-        const isHttp4xx = err instanceof Error && /HTTP 4\d\d/.test(err.message);
+        const isHttp4xx = err instanceof HttpStatusError && err.status >= 400 && err.status < 500;
         if (isHttp4xx || attempt >= TTS_RETRIES) throw err;
         await sleep(TTS_RETRY_DELAY_MS);
       }
     }
-    throw lastError instanceof Error ? lastError : new Error('TTS synthesis failed');
+    throw lastError instanceof Error ? lastError : new Error('Không thể tạo giọng đọc lúc này.');
   }
 
   private async parseTtsResponse(res: Response): Promise<TtsSynthesizeResponse> {

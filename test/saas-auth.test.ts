@@ -10,6 +10,7 @@ import {
   extractResponseData,
   formatDubbingBlockMessage,
   formatQuotaLabel,
+  formatUiError,
   formatVnd,
   parseDubbingBlockError
 } from '../src/shared/saas';
@@ -168,5 +169,27 @@ describe('PlaybackClock incremental 30s delta flush', () => {
     const d3 = clock.consumeDelta();
     assert.equal(d3, 12);
     assert.equal(clock.pendingDeltaSeconds, 0);
+  });
+});
+
+describe('formatUiError', () => {
+  it('strips Electron IPC invoke prefix and trailing HTTP status noise', () => {
+    const raw = new Error("Error invoking remote method 'tai:auth-login': Error: Đăng nhập thất bại (HTTP 502).");
+    assert.equal(formatUiError(raw), 'Đăng nhập thất bại');
+  });
+
+  it('preserves clean Vietnamese backend messages verbatim', () => {
+    assert.equal(
+      formatUiError("Error invoking remote method 'tai:auth-login': Error: Sai email hoặc mật khẩu"),
+      'Sai email hoặc mật khẩu'
+    );
+    assert.equal(formatUiError(new Error('Email đã được đăng ký')), 'Email đã được đăng ký');
+  });
+
+  it('maps raw network errors and empty inputs cleanly', () => {
+    assert.equal(formatUiError(new Error('TypeError: fetch failed')), 'Không thể kết nối đến máy chủ');
+    assert.equal(formatUiError(new Error('net::ERR_CONNECTION_REFUSED')), 'Không thể kết nối đến máy chủ');
+    assert.equal(formatUiError('', 'Đăng nhập thất bại'), 'Đăng nhập thất bại');
+    assert.equal(formatUiError(null, 'Đã xảy ra lỗi'), 'Đã xảy ra lỗi');
   });
 });

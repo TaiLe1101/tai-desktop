@@ -412,6 +412,13 @@ export interface DesktopApi {
   listPaymentOrders(): Promise<PaymentOrderDto[]>;
   getPaymentOrderStatus(paymentCode: string): Promise<PaymentOrderStatusDto>;
   cancelPaymentOrder(paymentCode: string): Promise<PaymentOrderStatusDto>;
+  // Custom Frameless Window Controls
+  windowMinimize(): Promise<void>;
+  windowToggleMaximize(): Promise<boolean>;
+  windowIsMaximized(): Promise<boolean>;
+  windowConfirmClose(): Promise<void>;
+  onWindowState(listener: (state: { isMaximized: boolean }) => void): () => void;
+  onRequestCloseConfirm(listener: () => void): () => void;
 }
 
 export interface VoiceChunk extends SubtitleSegment {

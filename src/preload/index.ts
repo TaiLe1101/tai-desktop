@@ -55,7 +55,22 @@ const api: DesktopApi = {
   createPaymentOrder: input => ipcRenderer.invoke('tai:saas-create-payment-order', input),
   listPaymentOrders: () => ipcRenderer.invoke('tai:saas-payment-orders'),
   getPaymentOrderStatus: paymentCode => ipcRenderer.invoke('tai:saas-payment-order-status', paymentCode),
-  cancelPaymentOrder: paymentCode => ipcRenderer.invoke('tai:saas-cancel-payment-order', paymentCode)
+  cancelPaymentOrder: paymentCode => ipcRenderer.invoke('tai:saas-cancel-payment-order', paymentCode),
+  // Custom Frameless Window Controls
+  windowMinimize: () => ipcRenderer.invoke('tai:window-minimize'),
+  windowToggleMaximize: () => ipcRenderer.invoke('tai:window-toggle-maximize'),
+  windowIsMaximized: () => ipcRenderer.invoke('tai:window-is-maximized'),
+  windowConfirmClose: () => ipcRenderer.invoke('tai:window-confirm-close'),
+  onWindowState: listener => {
+    const handler = (_event: unknown, state: { isMaximized: boolean }) => listener(state);
+    ipcRenderer.on('tai:window-state-changed', handler);
+    return () => { ipcRenderer.removeListener('tai:window-state-changed', handler); };
+  },
+  onRequestCloseConfirm: listener => {
+    const handler = () => listener();
+    ipcRenderer.on('tai:request-close-confirm', handler);
+    return () => { ipcRenderer.removeListener('tai:request-close-confirm', handler); };
+  }
 };
 
 contextBridge.exposeInMainWorld('tai', api);

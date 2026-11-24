@@ -98,9 +98,28 @@ export class AuthService {
         redirect: 'error',
         signal: controller.signal
       });
+    } catch {
+      throw new Error('Không thể kết nối đến máy chủ');
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  private resolveHttpErrorMessage(status: number, json: unknown, fallback: string): string {
+    const rawMsg = (json && typeof json === 'object' && 'message' in json)
+      ? (json as { message?: unknown }).message
+      : undefined;
+    if (typeof rawMsg === 'string' && rawMsg.trim()) {
+      return rawMsg.trim();
+    }
+    if (Array.isArray(rawMsg)) {
+      const first = rawMsg.find(item => typeof item === 'string' && item.trim());
+      if (typeof first === 'string') return first.trim();
+    }
+    if (status === 502 || status === 503 || status === 504) {
+      return 'Không thể kết nối đến máy chủ';
+    }
+    return fallback;
   }
 
   /**
@@ -123,10 +142,7 @@ export class AuthService {
 
     const json = await res.json().catch(() => null);
     if (!res.ok) {
-      const msg = (json && typeof json === 'object' && 'message' in json && typeof (json as { message?: unknown }).message === 'string')
-        ? (json as { message: string }).message
-        : `Máy chủ trả lỗi HTTP ${res.status}.`;
-      throw new Error(msg);
+      throw new Error(this.resolveHttpErrorMessage(res.status, json, 'Yêu cầu thất bại. Vui lòng thử lại.'));
     }
     return extractResponseData<T>(json);
   }
@@ -174,10 +190,7 @@ export class AuthService {
     });
     const json = await res.json().catch(() => null);
     if (!res.ok) {
-      const msg = (json && typeof json === 'object' && 'message' in json && typeof (json as { message?: unknown }).message === 'string')
-        ? (json as { message: string }).message
-        : `Đăng nhập thất bại (HTTP ${res.status}).`;
-      throw new Error(msg);
+      throw new Error(this.resolveHttpErrorMessage(res.status, json, 'Đăng nhập thất bại'));
     }
 
     const data = extractResponseData<{
@@ -227,10 +240,7 @@ export class AuthService {
     });
     const json = await res.json().catch(() => null);
     if (!res.ok) {
-      const msg = (json && typeof json === 'object' && 'message' in json && typeof (json as { message?: unknown }).message === 'string')
-        ? (json as { message: string }).message
-        : `Đăng ký thất bại (HTTP ${res.status}).`;
-      throw new Error(msg);
+      throw new Error(this.resolveHttpErrorMessage(res.status, json, 'Đăng ký thất bại'));
     }
 
     const data = extractResponseData<{
@@ -343,9 +353,9 @@ export class AuthService {
     const res = await this.serverFetch('/api/v1/public/plans', { method: 'GET' });
     const json = await res.json().catch(() => null);
     if (!res.ok) {
-      throw new Error(`Không tải được danh sách gói (HTTP ${res.status}).`);
+      throw new Error(this.resolveHttpErrorMessage(res.status, json, 'Không tải được danh sách gói dịch vụ'));
     }
-    const plans = extractResponseData<PlanDto[]>(json, 'Không tải được danh sách gói.');
+    const plans = extractResponseData<PlanDto[]>(json, 'Không tải được danh sách gói dịch vụ');
     return Array.isArray(plans) ? plans : [];
   }
 

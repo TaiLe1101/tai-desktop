@@ -15,7 +15,6 @@ import Tune from '@mui/icons-material/Tune';
 import WorkspacePremium from '@mui/icons-material/WorkspacePremium';
 import YouTube from '@mui/icons-material/YouTube';
 import {
-  Alert,
   Autocomplete,
   Box,
   Button,
@@ -63,7 +62,8 @@ import {
 import {
   computeQuotaPercent,
   formatDubbingBlockMessage,
-  formatQuotaLabel
+  formatQuotaLabel,
+  formatUiError
 } from '../shared/saas';
 import {
   DEFAULT_DUBBING_PREFERENCES,
@@ -74,6 +74,9 @@ import {
 } from '../shared/voices';
 import logoUrl from './assets/logo.png';
 import { AuthScreen } from './components/AuthScreen';
+import { SplashScreen } from './components/SplashScreen';
+import { TitleBar } from './components/TitleBar';
+import { ToastProvider, useToast } from './components/ToastProvider';
 import { UpgradeModal } from './components/UpgradeModal';
 import { VoicePlayer } from './player';
 import './style.css';
@@ -82,7 +85,6 @@ declare global { interface Window { tai: DesktopApi } }
 
 const MANUAL_SCROLL_PAUSE_MS = 5_000;
 const LOADING_HIDE_MS = 1_500;
-const TOAST_AUTO_HIDE_MS = 5_000;
 const SLIDER_DEBOUNCE_MS = 200;
 
 const theme = createTheme({
@@ -138,11 +140,12 @@ const filterCaptionLanguages = createFilterOptions<{ value: string; label: strin
 });
 
 function App() {
+  const { notify } = useToast();
+  const notifyRef = useRef(notify);
+  notifyRef.current = notify;
+
   const [screen, setScreen] = useState<'home' | 'youtube' | 'settings'>('home');
   const [session, setSession] = useState<VideoSession | null>(null);
-  const [error, setError] = useState('');
-  const [toast, setToast] = useState('');
-  const [notice, setNotice] = useState('');
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [runtimeStatus, setRuntimeStatus] = useState<DubbingRuntimeStatus>('idle');
   const [showLoadingBar, setShowLoadingBar] = useState(false);
@@ -161,9 +164,11 @@ function App() {
   const dubVolDebounce = useRef<number | null>(null);
 
   const [authLoaded, setAuthLoaded] = useState(false);
+  const [minSplashElapsed, setMinSplashElapsed] = useState(false);
   const [authState, setAuthState] = useState<AuthState>({ authenticated: false, user: null, entitlement: null });
   const [upgradeOpen, setUpgradeOpen] = useState(false);
-  const [blockAlert, setBlockAlert] = useState<{ code: DubbingBlockCode; message: string } | null>(null);
+  const [closeDialogOpen, setCloseDialogOpen] = useState(false);
+  const [isMaximized, setIsMaximized] = useState(true);
 
   const [form, setForm] = useState<SettingsInput>({ serverUrl: '', workerUrl: '', targetLang: 'vi', launchAtLogin: false });
   const [appVersion, setAppVersion] = useState<string>(() => (typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : ''));
@@ -178,13 +183,21 @@ function App() {
   const listRef = useRef<HTMLDivElement>(null);
   const manualScrollUntil = useRef(0);
   const lastActiveCueId = useRef<number | null>(null);
-  const toastTimer = useRef<number | null>(null);
   const loadingTimer = useRef<number | null>(null);
+  const lastNotifiedNavError = useRef('');
+  const lastNotifiedSessionSignal = useRef('');
+  const lastNotifiedBlockKey = useRef('');
+  const lastNotifiedUpdateKey = useRef('');
 
-  const showToast = (msg: string) => {
-    setToast(msg);
-    if (toastTimer.current) window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(''), TOAST_AUTO_HIDE_MS);
+  const showBlockToast = (code: DubbingBlockCode, message: string) => {
+    const cleanMsg = formatUiError(message, formatDubbingBlockMessage(code));
+    notifyRef.current({
+      severity: 'error',
+      message: cleanMsg,
+      actionLabel: code !== 'AUTH_REQUIRED' ? 'Nâng cấp gói' : undefined,
+      onAction: code !== 'AUTH_REQUIRED' ? () => setUpgradeOpen(true) : undefined,
+      dedupeKey: `block:${code}:${cleanMsg}`
+    });
   };
 
   const applyLiveQuota = (quota: QuotaDto) => {
@@ -204,13 +217,10 @@ function App() {
   if (!player.current) {
     player.current = new VoicePlayer({
       onStatusChange: status => setRuntimeStatus(status),
-      onToast: msg => showToast(msg),
+      onToast: msg => notifyRef.current({ severity: 'warning', message: formatUiError(msg) }),
       onFirstAudioStart: () => setControlsOpen(false),
       onQuotaUpdate: quota => applyLiveQuota(quota),
-      onBlocked: (code, message) => {
-        setBlockAlert({ code, message });
-        setError('');
-      }
+      onBlocked: (code, message) => showBlockToast(code, message)
     });
   }
 
@@ -219,12 +229,9 @@ function App() {
 
   const run = async (fn: () => Promise<unknown>) => {
     try {
-      setError('');
       await fn();
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setError(msg);
-      showToast(msg);
+      notifyRef.current({ severity: 'error', message: formatUiError(e) });
     }
   };
 
@@ -287,13 +294,17 @@ function App() {
       setAuthLoaded(true);
     });
 
+    const splashTimer = window.setTimeout(() => setMinSplashElapsed(true), 700);
+    void window.tai.windowIsMaximized().then(setIsMaximized).catch(() => {});
+    const unsubWinState = window.tai.onWindowState(st => setIsMaximized(Boolean(st.isMaximized)));
+    const unsubCloseReq = window.tai.onRequestCloseConfirm(() => setCloseDialogOpen(true));
+
     const unsubAuth = window.tai.onAuthState(nextAuth => {
       setAuthState(nextAuth);
       setAuthLoaded(true);
       if (!nextAuth.authenticated) {
         player.current?.stop();
         setUpgradeOpen(false);
-        setBlockAlert(null);
       }
     });
 
@@ -323,7 +334,7 @@ function App() {
           await player.current?.sync(s, activeVoice.current, prefsRef.current);
         }
       } catch (e) {
-        if (!dead) setError(String(e));
+        if (!dead) notifyRef.current({ severity: 'error', message: formatUiError(e) });
       } finally {
         busy = false;
       }
@@ -332,7 +343,10 @@ function App() {
     const timer = setInterval(() => { void tick(); }, 100);
     return () => {
       dead = true;
+      window.clearTimeout(splashTimer);
       clearInterval(timer);
+      unsubWinState();
+      unsubCloseReq();
       unsubAuth();
       unsubUpdate();
       player.current?.dispose();
@@ -356,21 +370,93 @@ function App() {
     setSourceLanguage(selected?.value || detected);
   }, [session?.videoId, session?.detectedSourceLanguage, session?.phase]);
 
+  // Deduplicated Snackbar notifications driven by state transitions (never spam on 100ms poll!)
   useEffect(() => {
     if (session?.blockCode) {
-      setBlockAlert({
-        code: session.blockCode,
-        message: session.error || formatDubbingBlockMessage(session.blockCode)
-      });
+      const key = `${session.videoId}|${session.blockCode}|${session.error}`;
+      if (lastNotifiedBlockKey.current !== key) {
+        lastNotifiedBlockKey.current = key;
+        showBlockToast(session.blockCode, session.error || formatDubbingBlockMessage(session.blockCode));
+      }
     } else if (session?.dubbingActive && session.phase === 'PLAYING') {
-      setBlockAlert(null);
+      lastNotifiedBlockKey.current = '';
     }
-  }, [session?.blockCode, session?.error, session?.dubbingActive, session?.phase]);
-
-  const modalCoveringView = upgradeOpen || showUpdateDialog;
+  }, [session?.videoId, session?.blockCode, session?.error, session?.dubbingActive, session?.phase]);
 
   useEffect(() => {
-    if (!authState.authenticated || screen !== 'youtube' || modalCoveringView) {
+    const navErr = screen === 'youtube' ? (session?.navigationError || '') : '';
+    if (navErr && navErr !== lastNotifiedNavError.current) {
+      lastNotifiedNavError.current = navErr;
+      notifyRef.current({ severity: 'warning', message: navErr, dedupeKey: `nav:${navErr}` });
+    } else if (!navErr) {
+      lastNotifiedNavError.current = '';
+    }
+  }, [screen, session?.navigationError]);
+
+  useEffect(() => {
+    if (!session) return;
+    if (session.phase === 'NO_SUBTITLES') {
+      const msg = session.error || 'Video không có phụ đề khả dụng.';
+      const key = `nosub:${session.videoId}:${msg}`;
+      if (lastNotifiedSessionSignal.current !== key) {
+        lastNotifiedSessionSignal.current = key;
+        notifyRef.current({ severity: 'info', message: msg, dedupeKey: key });
+      }
+    } else if (session.phase === 'ERROR' && !session.blockCode && session.error) {
+      const msg = formatUiError(session.error);
+      const key = `err:${session.videoId}:${msg}`;
+      if (lastNotifiedSessionSignal.current !== key) {
+        lastNotifiedSessionSignal.current = key;
+        notifyRef.current({ severity: 'error', message: msg, dedupeKey: key });
+      }
+    } else if (session.phase === 'PLAYING' || session.phase === 'IDLE') {
+      lastNotifiedSessionSignal.current = '';
+    }
+  }, [session?.videoId, session?.phase, session?.error, session?.blockCode]);
+
+  useEffect(() => {
+    const key = `${updateState.phase}|${updateState.version || ''}|${updateState.error || ''}`;
+    if (key === lastNotifiedUpdateKey.current) return;
+    if (updateState.phase === 'not-available') {
+      lastNotifiedUpdateKey.current = key;
+      notifyRef.current({
+        severity: 'success',
+        message: `Bạn đang dùng phiên bản mới nhất (v${updateState.currentVersion || appVersion}).`,
+        dedupeKey: key
+      });
+    } else if (updateState.phase === 'available' && updateState.version) {
+      lastNotifiedUpdateKey.current = key;
+      notifyRef.current({
+        severity: 'info',
+        message: `Đã có phiên bản mới v${updateState.version}!`,
+        actionLabel: 'Tải và cập nhật',
+        onAction: () => void run(() => window.tai.downloadUpdate()),
+        dedupeKey: key
+      });
+    } else if (updateState.phase === 'downloaded' && updateState.version) {
+      lastNotifiedUpdateKey.current = key;
+      notifyRef.current({
+        severity: 'success',
+        message: `Đã tải xong bản cập nhật v${updateState.version}!`,
+        actionLabel: 'Khởi động lại ngay',
+        onAction: () => void window.tai.installUpdate(),
+        dedupeKey: key
+      });
+    } else if (updateState.phase === 'error' && updateState.error) {
+      lastNotifiedUpdateKey.current = key;
+      notifyRef.current({
+        severity: 'warning',
+        message: formatUiError(updateState.error),
+        dedupeKey: key
+      });
+    }
+  }, [updateState.phase, updateState.version, updateState.error, updateState.currentVersion, appVersion]);
+
+  const splashVisible = !authLoaded || !minSplashElapsed;
+  const hideYoutubeView = splashVisible || !authState.authenticated || screen !== 'youtube' || upgradeOpen || showUpdateDialog || closeDialogOpen;
+
+  useEffect(() => {
+    if (hideYoutubeView) {
       if (!authState.authenticated || screen !== 'youtube') {
         player.current?.stop();
       }
@@ -386,13 +472,14 @@ function App() {
     const observer = new ResizeObserver(update);
     if (slot.current) observer.observe(slot.current);
     window.addEventListener('resize', update);
-    update();
+    const raf = window.requestAnimationFrame(update);
     return () => {
+      window.cancelAnimationFrame(raf);
       observer.disconnect();
       window.removeEventListener('resize', update);
       void window.tai.bounds(null);
     };
-  }, [screen, authState.authenticated, modalCoveringView]);
+  }, [hideYoutubeView, authState.authenticated, screen, isMaximized]);
 
   // Auto-scroll active transcript cue with 5,000ms manual-scroll pause
   const activeCueId = useMemo(() => {
@@ -464,39 +551,71 @@ function App() {
     setAuthState({ authenticated: false, user: null, entitlement: null });
     setScreen('home');
     setOpened(false);
-    setBlockAlert(null);
+    lastNotifiedBlockKey.current = '';
   };
 
-  if (!authLoaded) {
+  const closeConfirmDialog = (
+    <Dialog open={closeDialogOpen} onClose={() => setCloseDialogOpen(false)} maxWidth="xs" fullWidth>
+      <DialogTitle sx={{ fontWeight: 700 }}>Xác nhận thoát</DialogTitle>
+      <DialogContent>
+        <DialogContentText>
+          Bạn có chắc chắn muốn thoát TAI Desktop không?
+        </DialogContentText>
+      </DialogContent>
+      <DialogActions sx={{ p: 2, pt: 0 }}>
+        <Button onClick={() => setCloseDialogOpen(false)} color="inherit">Hủy</Button>
+        <Button
+          variant="contained"
+          color="error"
+          onClick={() => {
+            setCloseDialogOpen(false);
+            player.current?.stop();
+            void window.tai.windowConfirmClose();
+          }}
+        >
+          Thoát ứng dụng
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+
+  if (splashVisible) {
     return (
-      <Box sx={{ height: '100%', display: 'grid', placeItems: 'center', bgcolor: '#0b1018' }}>
-        <Stack sx={{ alignItems: 'center', gap: 1.5 }}>
-          <Box component="img" src={logoUrl} alt="TAI Desktop" sx={{ width: 64, height: 64, borderRadius: 3 }} />
-          <Typography variant="body2" color="text.secondary">Đang khởi tạo phiên đăng nhập…</Typography>
-        </Stack>
+      <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <TitleBar currentVersion={currentVersion} isMaximized={isMaximized} onRequestClose={() => setCloseDialogOpen(true)} />
+        <SplashScreen currentVersion={currentVersion} />
+        {closeConfirmDialog}
       </Box>
     );
   }
 
   if (!authState.authenticated) {
     return (
-      <AuthScreen
-        currentVersion={currentVersion}
-        initialNotice={
-          authState.reason === 'SESSION_EXPIRED' || authState.reason === 'AUTH_REQUIRED'
-            ? 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại để tiếp tục.'
-            : undefined
-        }
-        onAuthenticated={next => {
-          setAuthState(next);
-          setBlockAlert(null);
-        }}
-      />
+      <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <TitleBar currentVersion={currentVersion} isMaximized={isMaximized} onRequestClose={() => setCloseDialogOpen(true)} />
+        <Box sx={{ flex: 1, minHeight: 0, display: 'flex' }}>
+          <AuthScreen
+            currentVersion={currentVersion}
+            initialNotice={
+              authState.reason === 'SESSION_EXPIRED' || authState.reason === 'AUTH_REQUIRED'
+                ? 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại để tiếp tục.'
+                : undefined
+            }
+            onAuthenticated={next => {
+              setAuthState(next);
+              lastNotifiedBlockKey.current = '';
+            }}
+          />
+        </Box>
+        {closeConfirmDialog}
+      </Box>
     );
   }
 
   return (
-    <Box sx={{ height: '100%', display: 'flex' }}>
+    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <TitleBar currentVersion={currentVersion} isMaximized={isMaximized} onRequestClose={() => setCloseDialogOpen(true)} />
+      <Box sx={{ flex: 1, minHeight: 0, display: 'flex' }}>
       <Stack sx={{ width: 88, borderRight: '1px solid #263242', alignItems: 'center', py: 3, gap: 3 }}>
         <ButtonBase
           aria-label="TAI Desktop"
@@ -519,7 +638,6 @@ function App() {
         <IconButton aria-label="YouTube" onClick={() => void openYoutube()} color={screen === 'youtube' ? 'primary' : 'default'}><YouTube /></IconButton>
         <Box sx={{ flex: 1 }} />
         <IconButton aria-label="Cấu hình" onClick={() => setScreen('settings')} color={screen === 'settings' ? 'primary' : 'default'}><SettingsIcon /></IconButton>
-        <IconButton aria-label="Đăng xuất" title="Đăng xuất" onClick={() => void handleLogout()}><Logout fontSize="small" /></IconButton>
         <Typography variant="caption" color="text.secondary">{currentVersion ? `v${currentVersion}` : ''}</Typography>
       </Stack>
 
@@ -578,36 +696,8 @@ function App() {
             >
               Nâng cấp
             </Button>
-            <Button
-              size="small"
-              variant="outlined"
-              color="inherit"
-              startIcon={<Logout fontSize="small" />}
-              onClick={() => void handleLogout()}
-            >
-              Đăng xuất
-            </Button>
           </Stack>
         </Paper>
-
-        {blockAlert && (
-          <Alert
-            severity="error"
-            onClose={() => setBlockAlert(null)}
-            action={
-              blockAlert.code !== 'AUTH_REQUIRED' ? (
-                <Button color="inherit" size="small" variant="outlined" onClick={() => setUpgradeOpen(true)}>
-                  Nâng cấp gói
-                </Button>
-              ) : undefined
-            }
-          >
-            {blockAlert.message}
-          </Alert>
-        )}
-        {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
-        {toast && toast !== error && <Alert severity="warning" onClose={() => setToast('')}>{toast}</Alert>}
-        {screen === 'youtube' && session?.navigationError && <Alert severity="warning">{session.navigationError}</Alert>}
 
         {screen === 'home' && (
           <Box aria-label="Nền tảng" sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, 100px)', alignContent: 'start', gap: 2, flex: 1 }}>
@@ -908,13 +998,6 @@ function App() {
                         </Box>
                       </Stack>
                     </Collapse>
-
-                    {session?.phase === 'NO_SUBTITLES' && (
-                      <Alert severity="info" sx={{ py: 0.5 }}>{session.error || 'Video không có phụ đề khả dụng.'}</Alert>
-                    )}
-                    {session?.phase === 'ERROR' && (
-                      <Alert severity="error" sx={{ py: 0.5 }}>{session.error}</Alert>
-                    )}
                   </Box>
 
                   <Divider />
@@ -1043,7 +1126,7 @@ function App() {
                     dubbing: { ...prefs, targetLang: form.targetLang }
                   });
                   setPrefs(prev => ({ ...prev, targetLang: form.targetLang }));
-                  setNotice('Đã lưu cấu hình.');
+                  notify({ severity: 'success', message: 'Đã lưu cấu hình.' });
                 }).finally(() => setSaving(false));
               }}
             >
@@ -1065,7 +1148,6 @@ function App() {
                   label="Khởi động cùng Windows"
                 />
                 <Button type="submit" variant="contained" startIcon={<Translate />} disabled={saving}>Lưu cấu hình</Button>
-                {notice && <Alert severity="success">{notice}</Alert>}
               </Stack>
             </Paper>
 
@@ -1096,23 +1178,15 @@ function App() {
                 </Button>
               </Stack>
               {updateState.phase === 'checking' && <LinearProgress sx={{ my: 1 }} />}
-              {updateState.phase === 'not-available' && (
-                <Alert severity="success" sx={{ mt: 1 }}>
-                  Không có bản cập nhật mới hơn cho phiên bản hiện tại (v{currentVersion}).
-                </Alert>
-              )}
               {updateState.phase === 'available' && (
-                <Alert
-                  severity="info"
-                  sx={{ mt: 1 }}
-                  action={
-                    <Button color="primary" size="small" variant="contained" onClick={() => void run(() => window.tai.downloadUpdate())}>
-                      Tải và cập nhật
-                    </Button>
-                  }
-                >
-                  Đã có phiên bản mới: <strong>v{updateState.version}</strong>!
-                </Alert>
+                <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', mt: 1.5, gap: 1 }}>
+                  <Typography variant="body2" color="primary.main">
+                    Đã có phiên bản mới: <strong>v{updateState.version}</strong>
+                  </Typography>
+                  <Button color="primary" size="small" variant="contained" onClick={() => void run(() => window.tai.downloadUpdate())}>
+                    Tải và cập nhật
+                  </Button>
+                </Stack>
               )}
               {updateState.phase === 'downloading' && (
                 <Box sx={{ mt: 2 }}>
@@ -1129,20 +1203,14 @@ function App() {
                 </Box>
               )}
               {updateState.phase === 'downloaded' && (
-                <Alert
-                  severity="success"
-                  sx={{ mt: 1 }}
-                  action={
-                    <Button color="success" size="small" variant="contained" onClick={() => void window.tai.installUpdate()}>
-                      Khởi động lại ngay
-                    </Button>
-                  }
-                >
-                  Đã tải xong bản cập nhật <strong>v{updateState.version}</strong>!
-                </Alert>
-              )}
-              {updateState.phase === 'error' && (
-                <Alert severity="warning" sx={{ mt: 1 }}>{updateState.error}</Alert>
+                <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', mt: 1.5, gap: 1 }}>
+                  <Typography variant="body2" color="success.main">
+                    Đã tải xong bản cập nhật <strong>v{updateState.version}</strong>!
+                  </Typography>
+                  <Button color="success" size="small" variant="contained" onClick={() => void window.tai.installUpdate()}>
+                    Khởi động lại ngay
+                  </Button>
+                </Stack>
               )}
             </Paper>
           </Box>
@@ -1174,10 +1242,12 @@ function App() {
           onClose={() => setUpgradeOpen(false)}
           onSubmitted={() => void window.tai.refreshEntitlement().catch(() => {})}
           onPaid={() => {
-            setBlockAlert(null);
+            lastNotifiedBlockKey.current = '';
             void window.tai.refreshEntitlement().catch(() => {});
           }}
         />
+        {closeConfirmDialog}
+      </Box>
       </Box>
     </Box>
   );
@@ -1186,6 +1256,8 @@ function App() {
 createRoot(document.getElementById('root')!).render(
   <ThemeProvider theme={theme}>
     <CssBaseline />
-    <App />
+    <ToastProvider>
+      <App />
+    </ToastProvider>
   </ThemeProvider>
 );

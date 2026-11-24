@@ -1,6 +1,6 @@
 import { BrowserWindow, WebContentsView } from 'electron';
 import { DubbingClient, MAX_SUBTITLE_PAYLOAD_CHARS, SubtitleDownloadFailedError } from './dubbing-client';
-import { DubbingAuthOrQuotaError } from '../shared/saas';
+import { DubbingAuthOrQuotaError, formatUiError } from '../shared/saas';
 import { VoiceoverService } from './voiceover';
 import {
   controlVideoScript,
@@ -689,7 +689,7 @@ export class YoutubeSession {
         this.dubbingActive = false;
         this.state.dubbingActive = false;
         this.state.phase = 'ERROR';
-        this.state.error = err instanceof Error ? err.message : String(err);
+        this.state.error = formatUiError(err, 'Không thể khởi tạo lồng tiếng lúc này.');
         if (err instanceof DubbingAuthOrQuotaError) {
           this.state.blockCode = err.code;
           this.state.blockQuota = err.quota;
@@ -785,9 +785,9 @@ export class YoutubeSession {
           this.dubbingActive = false;
           this.state.dubbingActive = false;
           this.state.phase = 'ERROR';
-          this.state.error = err instanceof Error ? err.message : String(err);
+          this.state.error = formatUiError(err, 'Không thể tải đoạn dịch lúc này.');
         } else {
-          this.state.error = err instanceof Error ? err.message : String(err);
+          this.state.error = formatUiError(err, 'Không thể tải đoạn dịch lúc này.');
         }
       }
     } finally {
