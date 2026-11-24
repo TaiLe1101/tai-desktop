@@ -4,8 +4,12 @@ import type {
   AuthLoginInput,
   AuthRegisterInput,
   AuthState,
+  CreatePaymentOrderInput,
   CreateUpgradeRequestInput,
   EntitlementDto,
+  PaymentConfigDto,
+  PaymentOrderDto,
+  PaymentOrderStatusDto,
   PlanDto,
   QuotaDto,
   UpgradeRequestDto,
@@ -359,5 +363,45 @@ export class AuthService {
         ...(input.contactNote?.trim() ? { contactNote: input.contactNote.trim() } : {})
       })
     });
+  }
+
+  async getPaymentConfig(): Promise<PaymentConfigDto> {
+    try {
+      return await this.authedJson<PaymentConfigDto>('/api/v1/saas/me/payments/config', { method: 'GET' });
+    } catch {
+      return {
+        sepayEnabled: false,
+        bankCode: null,
+        accountName: null,
+        orderTtlMinutes: 15
+      };
+    }
+  }
+
+  async createPaymentOrder(input: CreatePaymentOrderInput): Promise<PaymentOrderDto> {
+    return this.authedJson<PaymentOrderDto>('/api/v1/saas/me/payments/orders', {
+      method: 'POST',
+      body: JSON.stringify({
+        planId: input.planId,
+        billingCycle: input.billingCycle
+      })
+    });
+  }
+
+  async listPaymentOrders(): Promise<PaymentOrderDto[]> {
+    const list = await this.authedJson<PaymentOrderDto[]>('/api/v1/saas/me/payments/orders', { method: 'GET' });
+    return Array.isArray(list) ? list : [];
+  }
+
+  async getPaymentOrderStatus(paymentCode: string): Promise<PaymentOrderStatusDto> {
+    const encoded = encodeURIComponent((paymentCode || '').trim());
+    if (!encoded) throw new Error('Mã thanh toán không hợp lệ.');
+    return this.authedJson<PaymentOrderStatusDto>(`/api/v1/saas/me/payments/orders/${encoded}/status`, { method: 'GET' });
+  }
+
+  async cancelPaymentOrder(paymentCode: string): Promise<PaymentOrderStatusDto> {
+    const encoded = encodeURIComponent((paymentCode || '').trim());
+    if (!encoded) throw new Error('Mã thanh toán không hợp lệ.');
+    return this.authedJson<PaymentOrderStatusDto>(`/api/v1/saas/me/payments/orders/${encoded}/cancel`, { method: 'POST' });
   }
 }

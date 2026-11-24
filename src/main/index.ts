@@ -12,6 +12,7 @@ import { DubbingAuthOrQuotaError, encodeBlockError } from '../shared/saas';
 import type {
   AuthLoginInput,
   AuthRegisterInput,
+  CreatePaymentOrderInput,
   CreateUpgradeRequestInput,
   DubbingPreferences,
   OverlayStatePayload,
@@ -176,6 +177,12 @@ else {
     handle('tai:saas-plans', () => authService.listPublicPlans());
     handle('tai:saas-upgrade-requests', () => authService.listUpgradeRequests());
     handle('tai:saas-create-upgrade-request', (input: CreateUpgradeRequestInput) => authService.createUpgradeRequest(input));
+    // SePay Payment IPC handlers
+    handle('tai:saas-payment-config', () => authService.getPaymentConfig());
+    handle('tai:saas-create-payment-order', (input: CreatePaymentOrderInput) => authService.createPaymentOrder(input));
+    handle('tai:saas-payment-orders', () => authService.listPaymentOrders());
+    handle('tai:saas-payment-order-status', (paymentCode: string) => authService.getPaymentOrderStatus(paymentCode));
+    handle('tai:saas-cancel-payment-order', (paymentCode: string) => authService.cancelPaymentOrder(paymentCode));
 
     await authService.init().catch(() => {});
     setTimeout(() => { void updater.checkForUpdates(); }, 5000);

@@ -208,6 +208,56 @@ export interface CreateUpgradeRequestInput {
   contactNote?: string;
 }
 
+// === Canonical SePay Payment DTOs ===
+export type PaymentOrderStatus = 'PENDING' | 'PAID' | 'EXPIRED' | 'CANCELED';
+export type PaymentPaidSource = 'WEBHOOK' | 'RECONCILIATION';
+
+export interface PaymentConfigDto {
+  sepayEnabled: boolean;
+  bankCode: string | null;
+  accountName: string | null;
+  orderTtlMinutes: number;
+}
+
+export interface CreatePaymentOrderInput {
+  planId: number;
+  billingCycle: 'MONTHLY' | 'YEARLY';
+}
+
+export interface PaymentOrderDto {
+  id: number;
+  paymentCode: string;
+  tenantId: number;
+  userId: number;
+  planId: number;
+  billingCycle: 'MONTHLY' | 'YEARLY';
+  amount: number;
+  currency: string;
+  status: PaymentOrderStatus;
+  bankCode: string;
+  accountNumber: string;
+  accountName: string;
+  transferContent: string;
+  qrUrl: string | null;
+  expiresAt: string;
+  paidAt: string | null;
+  paidAmount: number | null;
+  paidSource: PaymentPaidSource | null;
+  paidReferenceCode: string | null;
+  createdAt: string;
+  plan?: { id: number; code: string; name: string };
+  tenant?: { id: number; code: string; name: string };
+}
+
+export interface PaymentOrderStatusDto {
+  paymentCode: string;
+  status: PaymentOrderStatus;
+  amount: number;
+  paidAmount: number | null;
+  expiresAt: string;
+  paidAt: string | null;
+}
+
 export interface ReportSessionsResponse {
   accepted: number;
   quota?: QuotaDto;
@@ -356,6 +406,12 @@ export interface DesktopApi {
   listUpgradeRequests(): Promise<UpgradeRequestDto[]>;
   createUpgradeRequest(input: CreateUpgradeRequestInput): Promise<UpgradeRequestDto>;
   onAuthState(listener: (state: AuthState) => void): () => void;
+  // SePay Payment APIs
+  getPaymentConfig(): Promise<PaymentConfigDto>;
+  createPaymentOrder(input: CreatePaymentOrderInput): Promise<PaymentOrderDto>;
+  listPaymentOrders(): Promise<PaymentOrderDto[]>;
+  getPaymentOrderStatus(paymentCode: string): Promise<PaymentOrderStatusDto>;
+  cancelPaymentOrder(paymentCode: string): Promise<PaymentOrderStatusDto>;
 }
 
 export interface VoiceChunk extends SubtitleSegment {

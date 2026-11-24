@@ -49,7 +49,13 @@ const api: DesktopApi = {
     const handler = (_event: unknown, state: AuthState) => listener(state);
     ipcRenderer.on('tai:auth-state-changed', handler);
     return () => { ipcRenderer.removeListener('tai:auth-state-changed', handler); };
-  }
+  },
+  // SePay Payment APIs
+  getPaymentConfig: () => ipcRenderer.invoke('tai:saas-payment-config'),
+  createPaymentOrder: input => ipcRenderer.invoke('tai:saas-create-payment-order', input),
+  listPaymentOrders: () => ipcRenderer.invoke('tai:saas-payment-orders'),
+  getPaymentOrderStatus: paymentCode => ipcRenderer.invoke('tai:saas-payment-order-status', paymentCode),
+  cancelPaymentOrder: paymentCode => ipcRenderer.invoke('tai:saas-cancel-payment-order', paymentCode)
 };
 
 contextBridge.exposeInMainWorld('tai', api);

@@ -1173,6 +1173,10 @@ function App() {
           entitlement={entitlement}
           onClose={() => setUpgradeOpen(false)}
           onSubmitted={() => void window.tai.refreshEntitlement().catch(() => {})}
+          onPaid={() => {
+            setBlockAlert(null);
+            void window.tai.refreshEntitlement().catch(() => {});
+          }}
         />
       </Box>
     </Box>

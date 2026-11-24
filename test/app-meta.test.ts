@@ -33,6 +33,7 @@ describe('app branding assets and dynamic version metadata', () => {
 
     const html = readFileSync(resolve(root, 'src/renderer/index.html'), 'utf8');
     assert.equal(/\b\d+\.\d+\.\d+\b/.test(html), false, 'index.html should not hardcode a version');
+    assert.ok(html.includes('https://vietqr.app'), 'CSP img-src should allow https://vietqr.app for VietQR');
 
     const builtHtmlPath = resolve(root, 'out/renderer/index.html');
     if (existsSync(builtHtmlPath)) {
