@@ -62,6 +62,7 @@ import {
   getSelectedVoice,
   getVoicesForLang
 } from '../shared/voices';
+import logoUrl from './assets/logo.png';
 import { VoicePlayer } from './player';
 import './style.css';
 
@@ -148,6 +149,7 @@ function App() {
   const dubVolDebounce = useRef<number | null>(null);
 
   const [form, setForm] = useState<SettingsInput>({ serverUrl: '', workerUrl: '', targetLang: 'vi', launchAtLogin: false });
+  const [appVersion, setAppVersion] = useState<string>(() => (typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : ''));
   const [updateState, setUpdateState] = useState<UpdateState>({ phase: 'idle' });
   const [showUpdateDialog, setShowUpdateDialog] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -241,6 +243,8 @@ function App() {
         setDubVolumeUi(merged.dubVolume);
       }
       setCache((await window.tai.status()).cachePath);
+      const liveVersion = await window.tai.appVersion().catch(() => '');
+      if (liveVersion) setAppVersion(liveVersion);
     });
 
     const unsubUpdate = window.tai.onUpdateStatus(state => {
@@ -375,16 +379,37 @@ function App() {
   }
 
   const isDubbingRunning = Boolean(session?.dubbingActive);
+  const currentVersion = updateState.currentVersion || appVersion;
+
+  useEffect(() => {
+    document.title = currentVersion ? `TAI Desktop v${currentVersion}` : 'TAI Desktop';
+  }, [currentVersion]);
 
   return (
     <Box sx={{ height: '100%', display: 'flex' }}>
       <Stack sx={{ width: 88, borderRight: '1px solid #263242', alignItems: 'center', py: 3, gap: 3 }}>
-        <Box sx={{ background: '#98baff', color: '#0b1018', p: 1.3, borderRadius: 3, fontWeight: 900, fontSize: 22 }}>T</Box>
+        <ButtonBase
+          aria-label="TAI Desktop"
+          title={currentVersion ? `TAI Desktop v${currentVersion}` : 'TAI Desktop'}
+          onClick={() => setScreen('home')}
+          sx={{
+            width: 54,
+            height: 54,
+            borderRadius: 3,
+            overflow: 'hidden',
+            border: '1px solid rgba(152, 186, 255, 0.28)',
+            boxShadow: '0 4px 14px rgba(0, 0, 0, 0.45)',
+            transition: 'transform 0.15s ease, border-color 0.15s ease',
+            '&:hover': { transform: 'scale(1.04)', borderColor: '#98baff' }
+          }}
+        >
+          <Box component="img" src={logoUrl} alt="TAI Desktop logo" sx={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+        </ButtonBase>
         <IconButton aria-label="Trang chủ" onClick={() => setScreen('home')} color={screen === 'home' ? 'primary' : 'default'}><Home /></IconButton>
         <IconButton aria-label="YouTube" onClick={() => void openYoutube()} color={screen === 'youtube' ? 'primary' : 'default'}><YouTube /></IconButton>
         <Box sx={{ flex: 1 }} />
         <IconButton aria-label="Cấu hình" onClick={() => setScreen('settings')} color={screen === 'settings' ? 'primary' : 'default'}><SettingsIcon /></IconButton>
-        <Typography variant="caption" color="text.secondary">{updateState.currentVersion ? `v${updateState.currentVersion}` : ''}</Typography>
+        <Typography variant="caption" color="text.secondary">{currentVersion ? `v${currentVersion}` : ''}</Typography>
       </Stack>
 
       <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', p: screen === 'youtube' ? 1 : 3, gap: 1.5 }}>
@@ -749,7 +774,20 @@ function App() {
         {screen === 'settings' && (
           <Box sx={{ maxWidth: 760, width: '100%', mx: 'auto', overflow: 'auto', pb: 4 }}>
             <Button startIcon={<ArrowBack />} onClick={() => setScreen(opened ? 'youtube' : 'home')}>Quay lại</Button>
-            <Typography variant="h4" sx={{ my: 3 }}>Cài đặt ứng dụng</Typography>
+            <Stack direction="row" sx={{ alignItems: 'center', gap: 2, my: 3 }}>
+              <Box
+                component="img"
+                src={logoUrl}
+                alt="TAI Desktop logo"
+                sx={{ width: 48, height: 48, borderRadius: 2.5, objectFit: 'cover', border: '1px solid rgba(152, 186, 255, 0.28)' }}
+              />
+              <Box>
+                <Typography variant="h4" sx={{ lineHeight: 1.15 }}>Cài đặt ứng dụng</Typography>
+                {currentVersion && (
+                  <Typography variant="caption" color="text.secondary">TAI Desktop v{currentVersion}</Typography>
+                )}
+              </Box>
+            </Stack>
             <Paper
               component="form"
               variant="outlined"
@@ -803,7 +841,7 @@ function App() {
                 <Box>
                   <Typography sx={{ fontWeight: 700 }}>Cập nhật ứng dụng</Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Phiên bản hiện tại: {updateState.currentVersion ? `v${updateState.currentVersion}` : 'Đang xác định…'}
+                    Phiên bản hiện tại: {currentVersion ? `v${currentVersion}` : 'Đang xác định…'}
                   </Typography>
                 </Box>
                 <Button
@@ -818,7 +856,7 @@ function App() {
               {updateState.phase === 'checking' && <LinearProgress sx={{ my: 1 }} />}
               {updateState.phase === 'not-available' && (
                 <Alert severity="success" sx={{ mt: 1 }}>
-                  Không có bản cập nhật mới hơn cho phiên bản hiện tại (v{updateState.currentVersion}).
+                  Không có bản cập nhật mới hơn cho phiên bản hiện tại (v{currentVersion}).
                 </Alert>
               )}
               {updateState.phase === 'available' && (

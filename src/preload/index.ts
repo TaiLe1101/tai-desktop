@@ -24,6 +24,7 @@ const api: DesktopApi = {
     ipcRenderer.on('tai:update-status', handler);
     return () => { ipcRenderer.removeListener('tai:update-status', handler); };
   },
+  appVersion: () => ipcRenderer.invoke('tai:app-version'),
   // Realtime v2 APIs
   startDubbing: (videoId, options) => ipcRenderer.invoke('tai:start-dubbing', videoId, options),
   stopDubbing: () => ipcRenderer.invoke('tai:stop-dubbing'),

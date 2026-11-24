@@ -1,6 +1,6 @@
 {
   "name": "tai-desktop",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "TAI Desktop - YouTube caption translation and AI voiceover",
   "author": "DevT",
   "private": true,
@@ -32,6 +32,7 @@
     },
     "files": [
       "out/**/*",
+      "build/icon.*",
       "package.json"
     ],
     "extraResources": [
@@ -45,12 +46,16 @@
       "url": "https://localhost:3000/updates/"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true
+      "createDesktopShortcut": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico"
     }
   },
   "dependencies": {

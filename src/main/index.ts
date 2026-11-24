@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } from 'electron';
 import { setDefaultResultOrder } from 'node:dns';
 import { join } from 'node:path';
 import { SettingsStore } from './settings';
@@ -50,12 +50,15 @@ else {
     await ensureAudioDirectory(settings.getAudioDirectory());
     service = new VoiceoverService(settings.getAudioDirectory(), () => settings.worker());
     dubbingClient = new DubbingClient(() => settings.server(), () => settings.worker());
+    const currentVersion = app.getVersion() || (typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '');
+    const iconImage = nativeImage.createFromPath(join(__dirname, '../../build/icon.png'));
     window = new BrowserWindow({
       width: 1440,
       height: 920,
       minWidth: 1000,
       minHeight: 680,
-      title: 'TAI Desktop',
+      title: currentVersion ? `TAI Desktop v${currentVersion}` : 'TAI Desktop',
+      ...(iconImage.isEmpty() ? {} : { icon: iconImage }),
       backgroundColor: '#0b1018',
       autoHideMenuBar: true,
       webPreferences: {
@@ -131,6 +134,7 @@ else {
     handle('tai:check-update', () => updater.checkForUpdates());
     handle('tai:download-update', () => updater.downloadUpdate());
     handle('tai:install-update', () => updater.installUpdate());
+    handle('tai:app-version', () => app.getVersion() || (typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : ''));
 
     // Realtime v2 IPC handlers
     handle('tai:start-dubbing', (videoId: string, options?: StartDubbingOptions) => youtube.startDubbing(videoId, options));

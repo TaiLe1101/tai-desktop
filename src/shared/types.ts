@@ -206,6 +206,7 @@ export interface DesktopApi {
   downloadUpdate(): Promise<void>;
   installUpdate(): Promise<void>;
   onUpdateStatus(listener: (state: UpdateState) => void): () => void;
+  appVersion(): Promise<string>;
   // Realtime v2 APIs
   startDubbing(videoId: string, options?: StartDubbingOptions): Promise<void>;
   stopDubbing(): Promise<void>;
